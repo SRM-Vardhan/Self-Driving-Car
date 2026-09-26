@@ -74,7 +74,11 @@ def odom_callback(self, msg):
         # ⚠️ SHUKSHAM: WRITE ODOMETRY LOGIC HERE ⚠️
         # Task: Track the car's movement to update the map accurately.
         self.robot_x = msg.pose.pose.position.x
+<<<<<<< HEAD
         self.robot_y = msg.pose.pose.position.y
+=======
+self.robot_y = msg.pose.pose.position.y
+>>>>>>> 4707adc (Update my_car_slam package)
         # ==========================================
         # pass
 
