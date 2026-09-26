@@ -18,7 +18,7 @@ class SlamNode(Node):
         # ==========================================
         # ⚠️ SHUKSHAM: WRITE SLAM LOGIC HERE ⚠️
         # Task: Process the LiDAR scan data into a 2D map array.
-        points = point_cloud2.read_points(
+        points = PointCloud2.read_points(
             msg,
             field_names=('x', 'y', 'z'),
             skip_nans=True
