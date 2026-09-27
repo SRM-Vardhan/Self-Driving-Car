@@ -1,19 +1,10 @@
+import math
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix
 from geometry_msgs.msg import Point
 
-class WaypointNode(Node):
-    def __init__(self):
-        super().__init__('waypoint_node')
-        
-        # Listening to GPS
-        self.gps_sub = self.create_subscription(NavSatFix, '/gnss/fix', self.gps_callback, 10)
-        # Publishing X, Y coordinates
-        self.target_pub = self.create_publisher(Point, '/target_waypoint', 10)
-
-    def gps_callback(self, msg):
-        #import math
 
 # WGS-84 Earth semi-major axis
 EARTH_RADIUS = 6378137.0
@@ -23,16 +14,6 @@ def global_to_local(lat, lon, ref_lat, ref_lon):
     """
     Convert global GPS coordinates (latitude, longitude)
     into local East-North coordinates in meters.
-
-    Parameters:
-        lat     : Current GPS latitude in degrees
-        lon     : Current GPS longitude in degrees
-        ref_lat : Reference/origin latitude in degrees
-        ref_lon : Reference/origin longitude in degrees
-
-    Returns:
-        east    : Local East coordinate in meters
-        north   : Local North coordinate in meters
     """
 
     # Convert degrees to radians
@@ -53,66 +34,86 @@ def global_to_local(lat, lon, ref_lat, ref_lon):
     return east, north
 
 
-# --------------------------------------------------
-# REFERENCE / ORIGIN POINT
-# --------------------------------------------------
-# Set this to the starting point of your vehicle
-# obtained from your GNSS receiver.
+class WaypointNode(Node):
+    def __init__(self):
+        super().__init__('waypoint_node')
 
-REF_LAT = 28.600000
-REF_LON = 77.200000
+        # Listening to GNSS
+        self.gps_sub = self.create_subscription(
+            NavSatFix,
+            '/gnss/fix',
+            self.gps_callback,
+            10
+        )
 
+        # Publishing target X, Y coordinates
+        self.target_pub = self.create_publisher(
+            Point,
+            '/target_waypoint',
+            10
+        )
 
-# --------------------------------------------------
-# EXAMPLE LIVE GNSS DATA
-# --------------------------------------------------
-# Replace these values with latitude and longitude
-# received from your actual GNSS module.
+        # ==========================================
+        # REFERENCE / ORIGIN POINT
+        # ==========================================
+        # Ayush can update these later according to
+        # the selected simulation/real-world origin.
+        self.ref_lat = 28.600000
+        self.ref_lon = 77.200000
 
-current_lat = 28.600100
-current_lon = 77.200100
+    def gps_callback(self, msg):
 
-
-# Convert global GPS -> local coordinates
-east, north = global_to_local(
-    current_lat,
-    current_lon,
-    REF_LAT,
-    REF_LON
-)
-
-
-# Output local coordinates
-print(f"Local East  : {east:.2f} m")
-print(f"Local North : {north:.2f} m") ==========================================
-        # ⚠️ AYUSH: WRITE WAYPOINT LOGIC HERE ⚠️
+        # ==========================================
+        # ⚠️ AYUSH: WAYPOINT LOGIC
         #
-        # Task:
         # Convert GNSS latitude/longitude into
-        # local X-Y coordinates for the planner.
+        # local X-Y coordinates in meters.
         #
-        # Output convention:
-        #   x = target X coordinate in meters
-        #   y = target Y coordinate in meters
+        # Output:
+        #   x = local X coordinate
+        #   y = local Y coordinate
         #   z = unused
         #
-        # The X-Y frame must be consistent with
-        # the SLAM/map coordinate frame.
         # ==========================================
-        target_x = 0.0
-        target_y = 0.0
-        
+
+        current_lat = msg.latitude
+        current_lon = msg.longitude
+
+        east, north = global_to_local(
+            current_lat,
+            current_lon,
+            self.ref_lat,
+            self.ref_lon
+        )
+
+        # ==========================================
+        # TEMPORARY
+        #
+        # This currently publishes the converted
+        # GNSS position.
+        #
+        # The actual DESTINATION waypoint logic
+        # still needs to be completed by Ayush.
+        # ==========================================
+
         out_msg = Point()
-        out_msg.x = target_x
-        out_msg.y = target_y
+        out_msg.x = east
+        out_msg.y = north
+        out_msg.z = 0.0
+
         self.target_pub.publish(out_msg)
+
 
 def main(args=None):
     rclpy.init(args=args)
+
     node = WaypointNode()
+
     rclpy.spin(node)
+
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
