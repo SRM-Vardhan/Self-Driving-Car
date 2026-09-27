@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
@@ -10,12 +11,12 @@ from tf_transformations import quaternion_from_euler  # For quaternion handling
 
 class SimpleSLAM(Node):
 
-    def _init_(self):
-        super()._init_('slam_node')
+    def __init__(self):
+        super().__init__('slam_node')
 
         # Subscribers
         self.scan_sub = self.create_subscription(
-            LaserScan,
+            PointCloud2,
             '/scan',
             self.scan_callback,
             10)
@@ -56,27 +57,62 @@ class SimpleSLAM(Node):
                                        1.0 - 2.0 * (orientation_q.y * orientation_q.y + orientation_q.z * orientation_q.z))
 
     def scan_callback(self, msg):
-        # FIX 2: Handle invalid ranges (inf and NaN)
-        for i, distance in enumerate(msg.ranges):
-            # Skip invalid readings
-            if not np.isfinite(distance) or distance > msg.range_max or distance < msg.range_min:
-                continue
-                
-            angle = msg.angle_min + i * msg.angle_increment
+        # FIX 2: Handle invalid points from 3D PointCloud2
+        try:
+            points = point_cloud2.read_points(
+                msg,
+                field_names=('x', 'y', 'z'),
+                skip_nans=True
+            )
 
-            x = self.robot_x + distance * np.cos(angle)
-            y = self.robot_y + distance * np.sin(angle)
+            # Robot orientation
+            cos_theta = np.cos(self.robot_theta)
+            sin_theta = np.sin(self.robot_theta)
 
-            # FIX 3: Properly convert world coordinates to map indices
-            # Map origin is at bottom-left, so we need to offset and flip y-axis
-            map_x = int((x + self.map_width * self.map_resolution / 2) / self.map_resolution)
-            map_y = int((y + self.map_height * self.map_resolution / 2) / self.map_resolution)
+            for point in points:
+                local_x, local_y, local_z = point
 
-            if 0 <= map_x < self.map_width and 0 <= map_y < self.map_height:
-                self.map_data[map_x, map_y] = 100  # Mark obstacle (use comma for 2D indexing)
+                # Ignore points that are too low
+                # to reduce ground points in the 2D map.
+                if local_z < -0.5:
+                    continue
 
-        self.publish_map()
-        self.publish_tf()
+                # Convert LiDAR local coordinates
+                # to world/map coordinates.
+                x = (
+                    self.robot_x
+                    + local_x * cos_theta
+                    - local_y * sin_theta
+                )
+
+                y = (
+                    self.robot_y
+                    + local_x * sin_theta
+                    + local_y * cos_theta
+                )
+
+                # FIX 3: Properly convert world coordinates
+                # to map indices
+                map_x = int(
+                    (x + self.map_width * self.map_resolution / 2)
+                    / self.map_resolution
+                )
+
+                map_y = int(
+                    (y + self.map_height * self.map_resolution / 2)
+                    / self.map_resolution
+                )
+
+                if 0 <= map_x < self.map_width and 0 <= map_y < self.map_height:
+                    self.map_data[map_x, map_y] = 100
+
+            self.publish_map()
+            self.publish_tf()
+
+        except Exception as exc:
+            self.get_logger().error(
+                f'PointCloud2 processing failed: {exc}'
+            )
 
     def publish_map(self):
         map_msg = OccupancyGrid()
@@ -136,5 +172,5 @@ def main(args=None):
     rclpy.shutdown()
 
 
-if __name__ == '_main_':
+if __name__ == '__main__':
     main()
