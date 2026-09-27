@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from typing import Tuple, Optional, list
+from typing import Tuple, Optional
 
 import rclpy
 from rclpy.node import Node
@@ -973,14 +973,9 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info('Local Planner shutting down...')
     finally:
-    node.destroy_node()
-    rclpy.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
