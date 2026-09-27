@@ -3,15 +3,16 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
 from cv_bridge import CvBridge
-import cv2
+
+from my_car_lane_detection.lane_detector import detect_lane
 
 
 class LaneDetectionNode(Node):
     def __init__(self):
         super().__init__('lane_detector')
+
         self.bridge = CvBridge()
 
-        # Listening to the camera
         self.subscription = self.create_subscription(
             Image,
             '/camera/image_raw',
@@ -19,13 +20,6 @@ class LaneDetectionNode(Node):
             10
         )
 
-        # Publishing lateral lane error for the planner
-        # Unit: meters
-        #
-        # Sign convention:
-        #   +ve -> right
-        #   -ve -> left
-        #    0  -> centered
         self.publisher_ = self.create_publisher(
             Float32,
             '/lane_offset',
@@ -33,44 +27,29 @@ class LaneDetectionNode(Node):
         )
 
     def image_callback(self, msg):
-        # Convert ROS Image to OpenCV format
-        cv_image = self.bridge.imgmsg_to_cv2(msg, 'passthrough')
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            result = detect_lane(cv_image)
 
-        # ==========================================
-        # ⚠️ HRITVIK: WRITE OPENCV CODE HERE ⚠️
-        #
-        # Task:
-        # - Detect the lane boundaries
-        # - Calculate the lane center
-        # - Calculate vehicle lateral error
-        #
-        # Output:
-        #   lane_center_offset
-        #
-        # Convention:
-        #   +ve -> right
-        #   -ve -> left
-        #    0  -> centered
-        #
-        # Unit: meters
-        # ==========================================
+            lane_offset = result["lane_offset"]
 
-        lane_center_offset = 0.0
+            if lane_offset is None:
+                return
 
-        # Publish the result
-        msg_out = Float32()
-        msg_out.data = float(lane_center_offset)
-        self.publisher_.publish(msg_out)
+            msg_out = Float32()
+            msg_out.data = float(lane_offset)
+            self.publisher_.publish(msg_out)
 
-        # Optional debugging
-        # cv2.imshow("Lane Detection", cv_image)
-        # cv2.waitKey(1)
+        except Exception as e:
+            self.get_logger().error(f"Lane detection error: {e}")
 
 
 def main(args=None):
     rclpy.init(args=args)
+
     node = LaneDetectionNode()
     rclpy.spin(node)
+
     node.destroy_node()
     rclpy.shutdown()
 
