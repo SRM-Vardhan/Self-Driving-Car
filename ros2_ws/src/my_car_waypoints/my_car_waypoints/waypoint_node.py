@@ -3,8 +3,7 @@ import math
 import rclpy
 from rclpy.node import Node
 
-from sensor_msgs.msg import NavSatFix
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PointStamped
 
 
 class WaypointNode(Node):
@@ -13,49 +12,29 @@ class WaypointNode(Node):
         super().__init__('waypoint_node')
 
         # ==========================================================
-        # PARAMETERS
+        # SUBSCRIBER
         # ==========================================================
-        #
-        # For the current Gazebo integration:
-        #
-        # /target_waypoint is expressed directly in the MAP frame.
-        #
-        # x, y -> meters
-        #
-        # We are intentionally not converting the live GNSS fix
-        # into the target. The live GNSS fix is the vehicle's
-        # current position, NOT the destination.
-        #
-        self.declare_parameter('goal_x', 0.0)
-        self.declare_parameter('goal_y', 0.0)
-        self.declare_parameter('goal_enabled', False)
 
-        # ==========================================================
-        # GNSS INPUT
-        # ==========================================================
+        # RViz publishes a PointStamped when the user clicks
+        # the "Publish Point" tool.
         #
-        # Kept as part of the waypoint module.
-        #
-        # Later, this can support:
-        # GNSS destination -> local/map coordinates.
-        #
-        self.gps_sub = self.create_subscription(
-            NavSatFix,
-            '/gnss/fix',
-            self.gps_callback,
+        # We only accept clicked points expressed in the map frame.
+        self.clicked_point_sub = self.create_subscription(
+            PointStamped,
+            '/clicked_point',
+            self.clicked_point_callback,
             10
         )
 
         # ==========================================================
-        # TARGET WAYPOINT OUTPUT
+        # PUBLISHER
         # ==========================================================
+
+        # Global Planner expects:
+        # /target_waypoint -> geometry_msgs/msg/Point
         #
-        # Coordinate convention:
-        #
-        #   x = target X in map frame, meters
-        #   y = target Y in map frame, meters
-        #   z = unused
-        #
+        # Project convention:
+        # x, y are coordinates in the map frame, in meters.
         self.target_pub = self.create_publisher(
             Point,
             '/target_waypoint',
@@ -65,109 +44,108 @@ class WaypointNode(Node):
         # ==========================================================
         # STATE
         # ==========================================================
-        self.current_lat = None
-        self.current_lon = None
 
         self.goal_x = None
         self.goal_y = None
-        self.goal_enabled = False
-
-        self.load_goal()
-
-        # Publish periodically.
-        #
-        # This ensures the Global Planner receives the target even
-        # if it starts after the Waypoint Node.
-        self.publish_timer = self.create_timer(
-            1.0,
-            self.publish_target
-        )
 
         self.get_logger().info(
             'Waypoint Node started.'
         )
 
+        self.get_logger().info(
+            'Waiting for destination from RViz /clicked_point...'
+        )
+
     # ==============================================================
-    # LOAD DESTINATION
+    # RVIZ CLICK CALLBACK
     # ==============================================================
 
-    def load_goal(self):
+    def clicked_point_callback(self, msg):
 
-        self.goal_x = float(
-            self.get_parameter('goal_x').value
-        )
+        # ----------------------------------------------------------
+        # Frame validation
+        # ----------------------------------------------------------
 
-        self.goal_y = float(
-            self.get_parameter('goal_y').value
-        )
+        if msg.header.frame_id != 'map':
 
-        self.goal_enabled = bool(
-            self.get_parameter('goal_enabled').value
-        )
-
-        if not self.goal_enabled:
             self.get_logger().warn(
-                'No destination configured. '
-                'Set goal_enabled:=true and provide '
-                'goal_x and goal_y.'
+                'Ignoring clicked point: '
+                f'frame_id="{msg.header.frame_id}". '
+                'Expected frame_id="map".'
             )
+
             return
 
-        if not math.isfinite(self.goal_x):
-            self.get_logger().error(
-                'Invalid goal_x.'
+        # ----------------------------------------------------------
+        # Read coordinates
+        # ----------------------------------------------------------
+
+        x = float(msg.point.x)
+        y = float(msg.point.y)
+
+        # ----------------------------------------------------------
+        # Validate coordinates
+        # ----------------------------------------------------------
+
+        if not math.isfinite(x) or not math.isfinite(y):
+
+            self.get_logger().warn(
+                'Ignoring clicked point because X or Y is invalid.'
             )
-            self.goal_enabled = False
+
             return
 
-        if not math.isfinite(self.goal_y):
-            self.get_logger().error(
-                'Invalid goal_y.'
-            )
-            self.goal_enabled = False
-            return
+        # ----------------------------------------------------------
+        # Store destination
+        # ----------------------------------------------------------
+
+        self.goal_x = x
+        self.goal_y = y
 
         self.get_logger().info(
-            'Destination configured: '
-            f'x={self.goal_x:.3f} m, '
-            f'y={self.goal_y:.3f} m '
-            '(map frame)'
+            f'New destination selected: '
+            f'X={self.goal_x:.4f} m, '
+            f'Y={self.goal_y:.4f} m '
+            f'(map frame)'
         )
 
-    # ==============================================================
-    # GNSS CALLBACK
-    # ==============================================================
+        # ----------------------------------------------------------
+        # Publish destination
+        # ----------------------------------------------------------
 
-    def gps_callback(self, msg):
-
-        if not math.isfinite(msg.latitude):
-            return
-
-        if not math.isfinite(msg.longitude):
-            return
-
-        self.current_lat = msg.latitude
-        self.current_lon = msg.longitude
+        self.publish_target()
 
     # ==============================================================
-    # PUBLISH DESTINATION
+    # TARGET PUBLISHER
     # ==============================================================
 
     def publish_target(self):
 
-        if not self.goal_enabled:
+        # This should only be called after a valid click.
+        if self.goal_x is None or self.goal_y is None:
             return
 
-        out_msg = Point()
+        target = Point()
 
-        out_msg.x = self.goal_x
-        out_msg.y = self.goal_y
-        out_msg.z = 0.0
+        target.x = self.goal_x
+        target.y = self.goal_y
+        target.z = 0.0
 
-        self.target_pub.publish(out_msg)
+        self.target_pub.publish(target)
 
+        self.get_logger().info(
+            f'Published /target_waypoint: '
+            f'X={target.x:.4f}, '
+            f'Y={target.y:.4f}'
+        )
+
+
+# ==================================================================
+# MAIN
+# ==================================================================
 
 def main(args=None):
+
     rclpy.init(args=args)
 
     node = WaypointNode()
@@ -180,7 +158,9 @@ def main(args=None):
 
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
