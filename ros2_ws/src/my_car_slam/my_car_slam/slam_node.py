@@ -1,13 +1,12 @@
 
-
 import math
-from collections import deque
 
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -37,53 +36,133 @@ class SimpleSLAM(Node):
         self.declare_parameter('base_frame', 'base_link')
 
         self.declare_parameter('resolution', 0.05)
-
         self.declare_parameter('initial_map_size', 400)
 
-        self.declare_parameter('max_range', 8.0)
         self.declare_parameter('min_range', 0.10)
+        self.declare_parameter('max_range', 8.0)
 
-        self.declare_parameter('log_every_n_scans', 20)
+        # 3D PointCloud Z filtering
+        self.declare_parameter('min_z', -0.20)
+        self.declare_parameter('max_z', 0.50)
+
+        # Dynamic map expansion margin
+        self.declare_parameter('map_margin_cells', 20)
 
         # Scan matching
         self.declare_parameter('use_scan_matching', True)
         self.declare_parameter('match_every_n_scans', 5)
 
+        self.declare_parameter(
+            'min_occupied_cells_for_matching',
+            50
+        )
+
+        self.declare_parameter(
+            'min_scan_match_score',
+            5
+        )
+
+        # Statistics
+        self.declare_parameter(
+            'log_every_n_scans',
+            20
+        )
+
+        # ============================================================
+        # PARAMETERS -> VARIABLES
+        # ============================================================
+
         self.scan_topic = self.get_parameter(
-            'scan_topic').value
+            'scan_topic'
+        ).value
 
         self.odom_topic = self.get_parameter(
-            'odom_topic').value
+            'odom_topic'
+        ).value
 
         self.map_frame = self.get_parameter(
-            'map_frame').value
+            'map_frame'
+        ).value
 
         self.odom_frame = self.get_parameter(
-            'odom_frame').value
+            'odom_frame'
+        ).value
 
         self.base_frame = self.get_parameter(
-            'base_frame').value
+            'base_frame'
+        ).value
 
         self.resolution = float(
-            self.get_parameter('resolution').value)
+            self.get_parameter(
+                'resolution'
+            ).value
+        )
 
         self.initial_map_size = int(
-            self.get_parameter('initial_map_size').value)
-
-        self.max_range = float(
-            self.get_parameter('max_range').value)
+            self.get_parameter(
+                'initial_map_size'
+            ).value
+        )
 
         self.min_range = float(
-            self.get_parameter('min_range').value)
+            self.get_parameter(
+                'min_range'
+            ).value
+        )
 
-        self.log_every_n_scans = int(
-            self.get_parameter('log_every_n_scans').value)
+        self.max_range = float(
+            self.get_parameter(
+                'max_range'
+            ).value
+        )
+
+        self.min_z = float(
+            self.get_parameter(
+                'min_z'
+            ).value
+        )
+
+        self.max_z = float(
+            self.get_parameter(
+                'max_z'
+            ).value
+        )
+
+        self.map_margin_cells = int(
+            self.get_parameter(
+                'map_margin_cells'
+            ).value
+        )
 
         self.use_scan_matching = bool(
-            self.get_parameter('use_scan_matching').value)
+            self.get_parameter(
+                'use_scan_matching'
+            ).value
+        )
 
         self.match_every_n_scans = int(
-            self.get_parameter('match_every_n_scans').value)
+            self.get_parameter(
+                'match_every_n_scans'
+            ).value
+        )
+
+        self.min_occupied_cells_for_matching = int(
+            self.get_parameter(
+                'min_occupied_cells_for_matching'
+            ).value
+        )
+
+        self.min_scan_match_score = int(
+            self.get_parameter(
+                'min_scan_match_score'
+            ).value
+        )
+
+        self.log_every_n_scans = int(
+            self.get_parameter(
+                'log_every_n_scans'
+            ).value
+        )
 
         # ============================================================
         # MAP
@@ -93,16 +172,26 @@ class SimpleSLAM(Node):
         self.map_height = self.initial_map_size
 
         self.map_origin_x = -(
-            self.map_width * self.resolution / 2.0)
+            self.map_width *
+            self.resolution /
+            2.0
+        )
 
         self.map_origin_y = -(
-            self.map_height * self.resolution / 2.0)
+            self.map_height *
+            self.resolution /
+            2.0
+        )
 
         # -1 = UNKNOWN
         #  0 = FREE
         # 100 = OCCUPIED
+
         self.grid = np.full(
-            (self.map_height, self.map_width),
+            (
+                self.map_height,
+                self.map_width
+            ),
             -1,
             dtype=np.int8
         )
@@ -118,6 +207,7 @@ class SimpleSLAM(Node):
             self
         )
 
+        # This node is the ONLY publisher of map -> odom.
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(
             self
         )
@@ -141,60 +231,94 @@ class SimpleSLAM(Node):
         )
 
         # ============================================================
-        # PUBLISHERS
+        # MAP QoS
         # ============================================================
+
+        map_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
 
         self.map_pub = self.create_publisher(
             OccupancyGrid,
             '/map',
-            1
+            map_qos
         )
 
         # ============================================================
-        # ODOM STATE
+        # STATE
         # ============================================================
 
         self.last_odom_pose = None
 
-        # map -> odom correction
+        # map -> odom transform
         self.map_to_odom_x = 0.0
         self.map_to_odom_y = 0.0
         self.map_to_odom_yaw = 0.0
 
         self.scan_count = 0
 
-        # Prevent excessive map publishing
-        self.last_map_publish = self.get_clock().now()
+        self.last_match_score = 0
+        self.last_match_valid = False
+        self.last_occupied_count = 0
+
+        # ============================================================
+        # STARTUP LOGGING
+        # ============================================================
 
         self.get_logger().info(
-            '==========================================='
+            '=========================================='
         )
+
         self.get_logger().info(
-            'SimpleSLAM started'
+            'SimpleSLAM started - LIVE DATA MODE'
         )
+
         self.get_logger().info(
-            f'Scan topic : {self.scan_topic}'
+            f'/scan       : {self.scan_topic}'
         )
+
         self.get_logger().info(
-            f'Odom topic : {self.odom_topic}'
+            f'/odom       : {self.odom_topic}'
         )
+
         self.get_logger().info(
-            f'Map frame  : {self.map_frame}'
+            f'map frame   : {self.map_frame}'
         )
+
         self.get_logger().info(
-            f'Odom frame : {self.odom_frame}'
+            f'odom frame  : {self.odom_frame}'
         )
+
         self.get_logger().info(
-            f'Base frame : {self.base_frame}'
+            f'base frame  : {self.base_frame}'
         )
+
         self.get_logger().info(
-            f'Resolution  : {self.resolution} m/cell'
+            f'resolution  : {self.resolution} m'
         )
+
         self.get_logger().info(
-            'map -> odom is published ONLY by this node'
+            f'Z filter    : {self.min_z} to {self.max_z} m'
         )
+
         self.get_logger().info(
-            '==========================================='
+            f'min occupied cells: '
+            f'{self.min_occupied_cells_for_matching}'
+        )
+
+        self.get_logger().info(
+            f'min match score: '
+            f'{self.min_scan_match_score}'
+        )
+
+        self.get_logger().info(
+            'map -> odom published ONLY by SimpleSLAM'
+        )
+
+        self.get_logger().info(
+            '=========================================='
         )
 
     # ================================================================
@@ -236,52 +360,63 @@ class SimpleSLAM(Node):
             return
 
         # ------------------------------------------------------------
-        # Verify LiDAR -> base_link TF
+        # LASER FRAME
         # ------------------------------------------------------------
 
         laser_frame = msg.header.frame_id
 
-        if laser_frame == '':
+        if not laser_frame:
+
             self.get_logger().warn(
                 '/scan has empty frame_id'
             )
+
             return
+
+        # ------------------------------------------------------------
+        # LASER -> BASE_LINK TF
+        # ------------------------------------------------------------
 
         try:
 
-            laser_to_base = self.tf_buffer.lookup_transform(
-                self.base_frame,
-                laser_frame,
-                rclpy.time.Time(),
-                timeout=Duration(seconds=0.2)
+            laser_to_base = (
+                self.tf_buffer.lookup_transform(
+                    self.base_frame,
+                    laser_frame,
+                    rclpy.time.Time(),
+                    timeout=Duration(
+                        seconds=0.2
+                    )
+                )
             )
 
         except TransformException as ex:
 
             self.get_logger().warn(
-                f'No TF {laser_frame} -> '
+                f'TF unavailable: '
+                f'{laser_frame} -> '
                 f'{self.base_frame}: {ex}'
             )
 
             return
 
-        # Log TF once
         if self.scan_count == 1:
 
             self.get_logger().info(
-                f'LiDAR frame detected: {laser_frame}'
+                f'LiDAR frame: {laser_frame}'
             )
 
             self.get_logger().info(
-                f'Using TF: {laser_frame} -> '
+                f'Using TF: '
+                f'{laser_frame} -> '
                 f'{self.base_frame}'
             )
 
         # ------------------------------------------------------------
-        # Read PointCloud2
+        # READ POINTCLOUD
         # ------------------------------------------------------------
 
-        points = []
+        raw_points = []
 
         try:
 
@@ -307,56 +442,69 @@ class SimpleSLAM(Node):
                 if distance > self.max_range:
                     continue
 
-                points.append(
+                raw_points.append(
                     (x, y, z)
                 )
 
         except Exception as ex:
 
             self.get_logger().error(
-                f'PointCloud2 reading failed: {ex}'
+                f'PointCloud2 error: {ex}'
             )
 
             return
 
-        if len(points) == 0:
+        if not raw_points:
             return
 
         points = np.asarray(
-            points,
+            raw_points,
             dtype=np.float32
         )
 
         # ------------------------------------------------------------
-        # Transform LiDAR points -> base_link
+        # LASER -> BASE_LINK
         # ------------------------------------------------------------
 
         t = laser_to_base.transform.translation
-
         q = laser_to_base.transform.rotation
-
-        tx = t.x
-        ty = t.y
-        tz = t.z
-
-        qx = q.x
-        qy = q.y
-        qz = q.z
-        qw = q.w
 
         points_base = self.transform_points(
             points,
-            tx,
-            ty,
-            tz,
-            qx,
-            qy,
-            qz,
-            qw
+            t.x,
+            t.y,
+            t.z,
+            q.x,
+            q.y,
+            q.z,
+            q.w
         )
 
         # ------------------------------------------------------------
-        # ODOM pose
+        # Z FILTER
+        #  AFTER laser -> base_link TF.
+        # ------------------------------------------------------------
+
+        z_mask = (
+            (points_base[:, 2] >= self.min_z) &
+            (points_base[:, 2] <= self.max_z)
+        )
+
+        points_base = points_base[
+            z_mask
+        ]
+
+        if len(points_base) == 0:
+            return
+
+        # ------------------------------------------------------------
+        # ONLY X/Y ARE USED FOR 2D SLAM
+        # ------------------------------------------------------------
+
+        points_xy = points_base[:, :2]
+
+        # ------------------------------------------------------------
+        # ODOM POSE
         # ------------------------------------------------------------
 
         odom_x, odom_y, odom_yaw = (
@@ -364,7 +512,7 @@ class SimpleSLAM(Node):
         )
 
         # ------------------------------------------------------------
-        # Convert odom pose -> map pose
+        # ODOM -> MAP PREDICTED POSE
         # ------------------------------------------------------------
 
         map_x, map_y, map_yaw = (
@@ -376,8 +524,21 @@ class SimpleSLAM(Node):
         )
 
         # ------------------------------------------------------------
-        # Basic scan matching
+        # SCAN MATCHING
         # ------------------------------------------------------------
+
+        occupied_count = int(
+            np.count_nonzero(
+                self.grid == 100
+            )
+        )
+
+        self.last_occupied_count = (
+            occupied_count
+        )
+
+        match_score = 0
+        match_valid = False
 
         if (
             self.use_scan_matching
@@ -387,49 +548,90 @@ class SimpleSLAM(Node):
         ):
 
             (
-                map_x,
-                map_y,
-                map_yaw
+                matched_x,
+                matched_y,
+                matched_yaw,
+                match_score,
+                match_valid
             ) = self.scan_match(
-                points_base,
-                map_x,
-                map_y,
-                map_yaw
-            )
-
-            # Update map -> odom
-            self.update_map_to_odom(
+                points_xy,
                 map_x,
                 map_y,
                 map_yaw,
-                odom_x,
-                odom_y,
-                odom_yaw
+                occupied_count
             )
 
+            # --------------------------------------------------------
+            # ONLY ACCEPT VALID MATCH
+            # --------------------------------------------------------
+
+            if match_valid:
+
+                map_x = matched_x
+                map_y = matched_y
+                map_yaw = matched_yaw
+
+                # ONLY HERE update map -> odom
+                self.update_map_to_odom(
+                    map_x,
+                    map_y,
+                    map_yaw,
+                    odom_x,
+                    odom_y,
+                    odom_yaw
+                )
+
+        self.last_match_score = match_score
+        self.last_match_valid = match_valid
+
         # ------------------------------------------------------------
-        # Transform LiDAR points into MAP frame
+        # TRANSFORM WHOLE SCAN INTO MAP FRAME
         # ------------------------------------------------------------
 
         points_map = self.transform_points_2d(
-            points_base,
+            points_xy,
             map_x,
             map_y,
             map_yaw
         )
 
         # ------------------------------------------------------------
-        # Ray tracing
+        # IMPORTANT:
+        # EXPAND MAP ONCE USING WHOLE SCAN
+        # BEFORE CALCULATING GRID COORDINATES.
         # ------------------------------------------------------------
 
-        self.update_map(
+        self.expand_map_for_scan(
             map_x,
             map_y,
             points_map
         )
 
         # ------------------------------------------------------------
-        # Publish map
+        # NOW calculate robot grid coordinates.
+        #
+        # This uses the NEW map origin after expansion.
+        # ------------------------------------------------------------
+
+        robot_gx, robot_gy = (
+            self.world_to_grid(
+                map_x,
+                map_y
+            )
+        )
+
+        # ------------------------------------------------------------
+        # RAY TRACE
+        # ------------------------------------------------------------
+
+        self.update_map(
+            robot_gx,
+            robot_gy,
+            points_map
+        )
+
+        # ------------------------------------------------------------
+        # PUBLISH MAP
         # ------------------------------------------------------------
 
         self.publish_map(
@@ -437,7 +639,7 @@ class SimpleSLAM(Node):
         )
 
         # ------------------------------------------------------------
-        # Publish map -> odom TF
+        # PUBLISH map -> odom
         # ------------------------------------------------------------
 
         self.publish_map_odom_tf(
@@ -445,7 +647,7 @@ class SimpleSLAM(Node):
         )
 
         # ------------------------------------------------------------
-        # Statistics
+        # DEBUG STATISTICS
         # ------------------------------------------------------------
 
         if (
@@ -453,35 +655,51 @@ class SimpleSLAM(Node):
             self.log_every_n_scans == 0
         ):
 
-            unknown = np.count_nonzero(
-                self.grid == -1
+            unknown = int(
+                np.count_nonzero(
+                    self.grid == -1
+                )
             )
 
-            free = np.count_nonzero(
-                self.grid == 0
+            free = int(
+                np.count_nonzero(
+                    self.grid == 0
+                )
             )
 
-            occupied = np.count_nonzero(
-                self.grid == 100
+            occupied = int(
+                np.count_nonzero(
+                    self.grid == 100
+                )
             )
 
             total = self.grid.size
 
             self.get_logger().info(
-                f'Scan #{self.scan_count} | '
-                f'points={len(points)} | '
+                f'SCAN #{self.scan_count} | '
+                f'points={len(points_xy)} | '
+                f'map={self.map_width}x'
+                f'{self.map_height} | '
                 f'unknown={unknown} '
                 f'({unknown / total * 100:.1f}%) | '
                 f'free={free} '
                 f'({free / total * 100:.1f}%) | '
                 f'occupied={occupied} '
-                f'({occupied / total * 100:.1f}%) | '
-                f'map={self.map_width}x'
-                f'{self.map_height}'
+                f'({occupied / total * 100:.1f}%)'
+            )
+
+            self.get_logger().info(
+                f'Robot pose map: '
+                f'x={map_x:.2f}, '
+                f'y={map_y:.2f}, '
+                f'yaw={math.degrees(map_yaw):.1f} deg | '
+                f'occupied_cells={occupied_count} | '
+                f'match_score={match_score} | '
+                f'match_valid={match_valid}'
             )
 
     # ================================================================
-    # TRANSFORM POINTS
+    # POINT TRANSFORMATION
     # ================================================================
 
     def transform_points(
@@ -495,8 +713,6 @@ class SimpleSLAM(Node):
         qz,
         qw
     ):
-
-        # Rotation matrix from quaternion
 
         R = np.array([
             [
@@ -516,13 +732,14 @@ class SimpleSLAM(Node):
             ]
         ])
 
+        translation = np.array(
+            [tx, ty, tz],
+            dtype=np.float32
+        )
+
         return (
             points @ R.T
-            +
-            np.array(
-                [tx, ty, tz],
-                dtype=np.float32
-            )
+            + translation
         )
 
     # ================================================================
@@ -544,18 +761,14 @@ class SimpleSLAM(Node):
         py = points[:, 1]
 
         mx = (
-            c * px
-            -
-            s * py
-            +
+            c * px -
+            s * py +
             x
         )
 
         my = (
-            s * px
-            +
-            c * py
-            +
+            s * px +
+            c * py +
             y
         )
 
@@ -583,18 +796,14 @@ class SimpleSLAM(Node):
         )
 
         mx = (
-            c * x
-            -
-            s * y
-            +
+            c * x -
+            s * y +
             self.map_to_odom_x
         )
 
         my = (
-            s * x
-            +
-            c * y
-            +
+            s * x +
+            c * y +
             self.map_to_odom_y
         )
 
@@ -618,10 +827,34 @@ class SimpleSLAM(Node):
         points,
         x,
         y,
-        yaw
+        yaw,
+        occupied_count
     ):
 
-        # Keep computation reasonable
+        # ------------------------------------------------------------
+        # CONDITION 1:
+        # Do not scan match if map has too few occupied cells.
+        # ------------------------------------------------------------
+
+        if (
+            occupied_count <
+            self.min_occupied_cells_for_matching
+        ):
+
+            self.get_logger().debug(
+                'Scan matching skipped: '
+                f'only {occupied_count} occupied cells'
+            )
+
+            return (
+                x,
+                y,
+                yaw,
+                0,
+                False
+            )
+
+        # Limit number of points used for matching
 
         if len(points) > 100:
 
@@ -638,7 +871,7 @@ class SimpleSLAM(Node):
         best_y = y
         best_yaw = yaw
 
-        best_score = -1
+        best_score = 0
 
         translation_steps = [
             -0.10,
@@ -660,6 +893,7 @@ class SimpleSLAM(Node):
 
                     test_x = x + dx
                     test_y = y + dy
+
                     test_yaw = (
                         yaw + da
                     )
@@ -685,10 +919,32 @@ class SimpleSLAM(Node):
                         best_y = test_y
                         best_yaw = test_yaw
 
+        # ------------------------------------------------------------
+        # CONDITION 2:
+        # Reject zero/low score.
+        # ------------------------------------------------------------
+
+        if (
+            best_score <
+            self.min_scan_match_score
+        ):
+
+            return (
+                x,
+                y,
+                yaw,
+                best_score,
+                False
+            )
+
+        # Valid match
+
         return (
             best_x,
             best_y,
-            best_yaw
+            best_yaw,
+            best_score,
+            True
         )
 
     # ================================================================
@@ -704,9 +960,11 @@ class SimpleSLAM(Node):
 
         for p in points:
 
-            gx, gy = self.world_to_grid(
-                p[0],
-                p[1]
+            gx, gy = (
+                self.world_to_grid(
+                    p[0],
+                    p[1]
+                )
             )
 
             if (
@@ -715,57 +973,264 @@ class SimpleSLAM(Node):
                 0 <= gy < self.map_height
             ):
 
-                if self.grid[gy, gx] == 100:
+                if (
+                    self.grid[gy, gx]
+                    == 100
+                ):
 
                     score += 1
 
         return score
 
     # ================================================================
-    # UPDATE MAP
+    # DYNAMIC MAP EXPANSION
     # ================================================================
 
-    def update_map(
+    def expand_map_for_scan(
         self,
         robot_x,
         robot_y,
         points
     ):
 
-        # Make sure robot is inside map
+        # ------------------------------------------------------------
+        # Calculate required world bounds from:
+        #
+        # robot + ENTIRE scan
+        # ------------------------------------------------------------
 
-        self.expand_map_if_needed(
-            robot_x,
-            robot_y
-        )
+        min_x = robot_x
+        max_x = robot_x
 
-        robot_gx, robot_gy = (
-            self.world_to_grid(
-                robot_x,
-                robot_y
-            )
-        )
+        min_y = robot_y
+        max_y = robot_y
 
-        for p in points:
+        if len(points) > 0:
 
-            end_x = float(p[0])
-            end_y = float(p[1])
-
-            self.expand_map_if_needed(
-                end_x,
-                end_y
-            )
-
-            end_gx, end_gy = (
-                self.world_to_grid(
-                    end_x,
-                    end_y
+            min_x = min(
+                min_x,
+                float(
+                    np.min(
+                        points[:, 0]
+                    )
                 )
             )
 
-            # --------------------------------------------------------
-            # RAY TRACE
-            # --------------------------------------------------------
+            max_x = max(
+                max_x,
+                float(
+                    np.max(
+                        points[:, 0]
+                    )
+                )
+            )
+
+            min_y = min(
+                min_y,
+                float(
+                    np.min(
+                        points[:, 1]
+                    )
+                )
+            )
+
+            max_y = max(
+                max_y,
+                float(
+                    np.max(
+                        points[:, 1]
+                    )
+                )
+            )
+
+        # Add margin
+
+        margin = (
+            self.map_margin_cells *
+            self.resolution
+        )
+
+        required_min_x = (
+            min_x - margin
+        )
+
+        required_max_x = (
+            max_x + margin
+        )
+
+        required_min_y = (
+            min_y - margin
+        )
+
+        required_max_y = (
+            max_y + margin
+        )
+
+        current_min_x = (
+            self.map_origin_x
+        )
+
+        current_min_y = (
+            self.map_origin_y
+        )
+
+        current_max_x = (
+            self.map_origin_x +
+            self.map_width *
+            self.resolution
+        )
+
+        current_max_y = (
+            self.map_origin_y +
+            self.map_height *
+            self.resolution
+        )
+
+        needs_expansion = (
+            required_min_x < current_min_x
+            or
+            required_max_x > current_max_x
+            or
+            required_min_y < current_min_y
+            or
+            required_max_y > current_max_y
+        )
+
+        if not needs_expansion:
+            return
+
+        # ------------------------------------------------------------
+        # Calculate NEW bounds ONCE
+        # ------------------------------------------------------------
+
+        new_min_x = min(
+            current_min_x,
+            required_min_x
+        )
+
+        new_max_x = max(
+            current_max_x,
+            required_max_x
+        )
+
+        new_min_y = min(
+            current_min_y,
+            required_min_y
+        )
+
+        new_max_y = max(
+            current_max_y,
+            required_max_y
+        )
+
+        new_width = int(
+            math.ceil(
+                (
+                    new_max_x -
+                    new_min_x
+                ) /
+                self.resolution
+            )
+        )
+
+        new_height = int(
+            math.ceil(
+                (
+                    new_max_y -
+                    new_min_y
+                ) /
+                self.resolution
+            )
+        )
+
+        # ------------------------------------------------------------
+        # Create new UNKNOWN map
+        # ------------------------------------------------------------
+
+        new_grid = np.full(
+            (
+                new_height,
+                new_width
+            ),
+            -1,
+            dtype=np.int8
+        )
+
+        # ------------------------------------------------------------
+        # Calculate where old map goes
+        # ------------------------------------------------------------
+
+        offset_x = int(
+            round(
+                (
+                    self.map_origin_x -
+                    new_min_x
+                ) /
+                self.resolution
+            )
+        )
+
+        offset_y = int(
+            round(
+                (
+                    self.map_origin_y -
+                    new_min_y
+                ) /
+                self.resolution
+            )
+        )
+
+        new_grid[
+            offset_y:
+            offset_y + self.map_height,
+            offset_x:
+            offset_x + self.map_width
+        ] = self.grid
+
+        # ------------------------------------------------------------
+        # Replace map
+        # ------------------------------------------------------------
+
+        self.grid = new_grid
+
+        self.map_width = new_width
+        self.map_height = new_height
+
+        self.map_origin_x = new_min_x
+        self.map_origin_y = new_min_y
+
+        self.get_logger().info(
+            f'Map expanded ONCE: '
+            f'{new_width}x{new_height}, '
+            f'origin=({new_min_x:.2f}, '
+            f'{new_min_y:.2f})'
+        )
+
+    # ================================================================
+    # MAP UPDATE / RAY TRACING
+    # ================================================================
+
+    def update_map(
+        self,
+        robot_gx,
+        robot_gy,
+        points
+    ):
+
+        # IMPORTANT:
+        # No map expansion happens here.
+        #
+        # All coordinates were calculated after the
+        # whole-scan expansion.
+
+        for p in points:
+
+            end_gx, end_gy = (
+                self.world_to_grid(
+                    float(p[0]),
+                    float(p[1])
+                )
+            )
 
             cells = self.bresenham(
                 robot_gx,
@@ -774,10 +1239,12 @@ class SimpleSLAM(Node):
                 end_gy
             )
 
-            if len(cells) == 0:
+            if not cells:
                 continue
 
-            # All cells except final = FREE
+            # --------------------------------------------------------
+            # FREE CELLS
+            # --------------------------------------------------------
 
             for gx, gy in cells[:-1]:
 
@@ -787,13 +1254,18 @@ class SimpleSLAM(Node):
                     0 <= gy < self.map_height
                 ):
 
-                    # Do not overwrite occupied cells
+                    # Do not overwrite occupied cells.
 
-                    if self.grid[gy, gx] != 100:
+                    if (
+                        self.grid[gy, gx]
+                        != 100
+                    ):
 
                         self.grid[gy, gx] = 0
 
-            # Final cell = OCCUPIED
+            # --------------------------------------------------------
+            # OCCUPIED END CELL
+            # --------------------------------------------------------
 
             gx, gy = cells[-1]
 
@@ -806,7 +1278,7 @@ class SimpleSLAM(Node):
                 self.grid[gy, gx] = 100
 
     # ================================================================
-    # BRESENHAM RAY TRACING
+    # BRESENHAM
     # ================================================================
 
     def bresenham(
@@ -822,8 +1294,17 @@ class SimpleSLAM(Node):
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
 
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
+        sx = (
+            1
+            if x0 < x1
+            else -1
+        )
+
+        sy = (
+            1
+            if y0 < y1
+            else -1
+        )
 
         err = dx - dy
 
@@ -855,103 +1336,6 @@ class SimpleSLAM(Node):
         return cells
 
     # ================================================================
-    # DYNAMIC MAP EXPANSION
-    # ================================================================
-
-    def expand_map_if_needed(
-        self,
-        x,
-        y
-    ):
-
-        margin = 20
-
-        gx, gy = self.world_to_grid(
-            x,
-            y
-        )
-
-        expand_left = gx < margin
-        expand_right = (
-            gx >= self.map_width - margin
-        )
-
-        expand_bottom = gy < margin
-        expand_top = (
-            gy >= self.map_height - margin
-        )
-
-        if not (
-            expand_left
-            or expand_right
-            or expand_bottom
-            or expand_top
-        ):
-            return
-
-        old_grid = self.grid
-
-        old_width = self.map_width
-        old_height = self.map_height
-
-        new_width = old_width
-        new_height = old_height
-
-        shift_x = 0
-        shift_y = 0
-
-        if expand_left:
-
-            new_width += old_width // 2
-            shift_x += old_width // 2
-
-        if expand_right:
-
-            new_width += old_width // 2
-
-        if expand_bottom:
-
-            new_height += old_height // 2
-            shift_y += old_height // 2
-
-        if expand_top:
-
-            new_height += old_height // 2
-
-        new_grid = np.full(
-            (new_height, new_width),
-            -1,
-            dtype=np.int8
-        )
-
-        new_grid[
-            shift_y:
-            shift_y + old_height,
-            shift_x:
-            shift_x + old_width
-        ] = old_grid
-
-        self.grid = new_grid
-
-        self.map_width = new_width
-        self.map_height = new_height
-
-        self.map_origin_x -= (
-            shift_x *
-            self.resolution
-        )
-
-        self.map_origin_y -= (
-            shift_y *
-            self.resolution
-        )
-
-        self.get_logger().info(
-            f'Map expanded to '
-            f'{new_width}x{new_height}'
-        )
-
-    # ================================================================
     # WORLD -> GRID
     # ================================================================
 
@@ -963,16 +1347,20 @@ class SimpleSLAM(Node):
 
         gx = int(
             math.floor(
-                (x - self.map_origin_x)
-                /
+                (
+                    x -
+                    self.map_origin_x
+                ) /
                 self.resolution
             )
         )
 
         gy = int(
             math.floor(
-                (y - self.map_origin_y)
-                /
+                (
+                    y -
+                    self.map_origin_y
+                ) /
                 self.resolution
             )
         )
@@ -980,7 +1368,7 @@ class SimpleSLAM(Node):
         return gx, gy
 
     # ================================================================
-    # MAP -> ODOM UPDATE
+    # UPDATE map -> odom
     # ================================================================
 
     def update_map_to_odom(
@@ -1015,8 +1403,7 @@ class SimpleSLAM(Node):
         correction_x = (
             map_x -
             (
-                c * odom_x
-                -
+                c * odom_x -
                 s * odom_y
             )
         )
@@ -1024,8 +1411,7 @@ class SimpleSLAM(Node):
         correction_y = (
             map_y -
             (
-                s * odom_x
-                +
+                s * odom_x +
                 c * odom_y
             )
         )
@@ -1080,17 +1466,27 @@ class SimpleSLAM(Node):
 
         msg.info.origin.position.z = 0.0
 
+        msg.info.origin.orientation.x = 0.0
+        msg.info.origin.orientation.y = 0.0
+        msg.info.origin.orientation.z = 0.0
         msg.info.origin.orientation.w = 1.0
+
+        # Keep:
+        # -1 = UNKNOWN
+        #  0 = FREE
+        # 100 = OCCUPIED
 
         msg.data = (
             self.grid.flatten()
             .tolist()
         )
 
-        self.map_pub.publish(msg)
+        self.map_pub.publish(
+            msg
+        )
 
     # ================================================================
-    # PUBLISH MAP -> ODOM TF
+    # PUBLISH map -> odom TF
     # ================================================================
 
     def publish_map_odom_tf(
@@ -1120,10 +1516,13 @@ class SimpleSLAM(Node):
 
         transform.transform.translation.z = 0.0
 
-        qx, qy, qz, qw = (
-            self.yaw_to_quaternion(
-                self.map_to_odom_yaw
-            )
+        (
+            qx,
+            qy,
+            qz,
+            qw
+        ) = self.yaw_to_quaternion(
+            self.map_to_odom_yaw
         )
 
         transform.transform.rotation.x = qx
@@ -1149,13 +1548,19 @@ class SimpleSLAM(Node):
 
         siny_cosp = (
             2.0 *
-            (w * z + x * y)
+            (
+                w * z +
+                x * y
+            )
         )
 
         cosy_cosp = (
             1.0 -
             2.0 *
-            (y * y + z * z)
+            (
+                y * y +
+                z * z
+            )
         )
 
         return math.atan2(
@@ -1172,19 +1577,15 @@ class SimpleSLAM(Node):
         yaw
     ):
 
-        qz = math.sin(
-            yaw / 2.0
-        )
-
-        qw = math.cos(
-            yaw / 2.0
-        )
-
         return (
             0.0,
             0.0,
-            qz,
-            qw
+            math.sin(
+                yaw / 2.0
+            ),
+            math.cos(
+                yaw / 2.0
+            )
         )
 
     # ================================================================
@@ -1211,7 +1612,9 @@ class SimpleSLAM(Node):
 
 def main(args=None):
 
-    rclpy.init(args=args)
+    rclpy.init(
+        args=args
+    )
 
     node = SimpleSLAM()
 
