@@ -12,29 +12,88 @@ class WaypointNode(Node):
         super().__init__('waypoint_node')
 
         # ==========================================================
-        # SUBSCRIBER
+        # CONFIGURATION
         # ==========================================================
 
-        # RViz publishes a PointStamped when the user clicks
-        # the "Publish Point" tool.
+        # Current simulation destination source.
         #
-        # We only accept clicked points expressed in the map frame.
-        self.clicked_point_sub = self.create_subscription(
-            PointStamped,
-            '/clicked_point',
-            self.clicked_point_callback,
-            10
+        # True:
+        #   Receive destination from RViz /clicked_point.
+        #
+        # False:
+        #   No destination source is active.
+        #
+        # There is intentionally NO default destination.
+        self.declare_parameter(
+            'use_rviz_destination',
+            True
         )
 
+        self.use_rviz_destination = bool(
+            self.get_parameter(
+                'use_rviz_destination'
+            ).value
+        )
+
+        # How frequently the currently selected destination
+        # is republished.
+        #
+        # This prevents the Global Planner from missing a goal
+        # because it started after the original click.
+        self.declare_parameter(
+            'publish_rate',
+            1.0
+        )
+
+        self.publish_rate = float(
+            self.get_parameter(
+                'publish_rate'
+            ).value
+        )
+
+        if self.publish_rate <= 0.0:
+            raise ValueError(
+                'publish_rate must be greater than 0.'
+            )
+
         # ==========================================================
-        # PUBLISHER
+        # DESTINATION STATE
         # ==========================================================
 
-        # Global Planner expects:
-        # /target_waypoint -> geometry_msgs/msg/Point
+        # None means that no destination has been selected yet.
+        self.goal_x = None
+        self.goal_y = None
+
+        # ==========================================================
+        # INPUT: RVIZ DESTINATION
+        # ==========================================================
+
+        self.clicked_point_sub = None
+
+        if self.use_rviz_destination:
+
+            self.clicked_point_sub = self.create_subscription(
+                PointStamped,
+                '/clicked_point',
+                self.clicked_point_callback,
+                10
+            )
+
+        # ==========================================================
+        # OUTPUT: TARGET WAYPOINT
+        # ==========================================================
+
+        # Global Planner interface:
+        #
+        # /target_waypoint
+        # geometry_msgs/msg/Point
         #
         # Project convention:
-        # x, y are coordinates in the map frame, in meters.
+        #
+        #   x = map X coordinate [m]
+        #   y = map Y coordinate [m]
+        #   z = 0
+        #
         self.target_pub = self.create_publisher(
             Point,
             '/target_waypoint',
@@ -42,42 +101,70 @@ class WaypointNode(Node):
         )
 
         # ==========================================================
-        # STATE
+        # REPUBLISH TIMER
         # ==========================================================
 
-        self.goal_x = None
-        self.goal_y = None
-
-        self.get_logger().info(
-            'Waypoint Node started.'
+        self.publish_timer = self.create_timer(
+            1.0 / self.publish_rate,
+            self.publish_target
         )
 
+        # ==========================================================
+        # STARTUP INFORMATION
+        # ==========================================================
+
         self.get_logger().info(
-            'Waiting for destination from RViz /clicked_point...'
+            'Waypoint / Destination Manager started.'
         )
+
+        if self.use_rviz_destination:
+
+            self.get_logger().info(
+                'Destination source: RViz /clicked_point'
+            )
+
+            self.get_logger().info(
+                'Waiting for a destination in the map frame...'
+            )
+
+        else:
+
+            self.get_logger().warn(
+                'No destination source is enabled.'
+            )
 
     # ==============================================================
-    # RVIZ CLICK CALLBACK
+    # RVIZ DESTINATION CALLBACK
     # ==============================================================
 
     def clicked_point_callback(self, msg):
+        """
+        Receive a destination selected in RViz.
+
+        Expected input:
+            /clicked_point
+            geometry_msgs/msg/PointStamped
+
+        Required frame:
+            map
+        """
 
         # ----------------------------------------------------------
-        # Frame validation
+        # Check coordinate frame
         # ----------------------------------------------------------
 
         if msg.header.frame_id != 'map':
 
             self.get_logger().warn(
-                'Ignoring clicked point: '
-                f'frame_id="{msg.header.frame_id}". '
-                'Expected frame_id="map".'
+                'Ignoring destination because it is not in '
+                f'the map frame. Received frame: '
+                f'"{msg.header.frame_id}"'
             )
 
             return
 
         # ----------------------------------------------------------
-        # Read coordinates
+        # Extract coordinates
         # ----------------------------------------------------------
 
         x = float(msg.point.x)
@@ -87,57 +174,93 @@ class WaypointNode(Node):
         # Validate coordinates
         # ----------------------------------------------------------
 
-        if not math.isfinite(x) or not math.isfinite(y):
+        if not math.isfinite(x):
 
             self.get_logger().warn(
-                'Ignoring clicked point because X or Y is invalid.'
+                'Ignoring destination: X is not finite.'
+            )
+
+            return
+
+        if not math.isfinite(y):
+
+            self.get_logger().warn(
+                'Ignoring destination: Y is not finite.'
             )
 
             return
 
         # ----------------------------------------------------------
-        # Store destination
+        # Store new destination
         # ----------------------------------------------------------
 
         self.goal_x = x
         self.goal_y = y
 
         self.get_logger().info(
-            f'New destination selected: '
+            'New destination selected: '
             f'X={self.goal_x:.4f} m, '
             f'Y={self.goal_y:.4f} m '
-            f'(map frame)'
+            '(map frame)'
         )
 
-        # ----------------------------------------------------------
-        # Publish destination
-        # ----------------------------------------------------------
-
+        # Publish immediately rather than waiting for the timer.
         self.publish_target()
 
     # ==============================================================
-    # TARGET PUBLISHER
+    # TARGET WAYPOINT PUBLISHER
     # ==============================================================
 
     def publish_target(self):
+        """
+        Publish the currently selected destination.
 
-        # This should only be called after a valid click.
+        Nothing is published until a valid destination has been
+        selected.
+        """
+
+        # ----------------------------------------------------------
+        # No destination yet
+        # ----------------------------------------------------------
+
         if self.goal_x is None or self.goal_y is None:
             return
+
+        # ----------------------------------------------------------
+        # Create target message
+        # ----------------------------------------------------------
 
         target = Point()
 
         target.x = self.goal_x
         target.y = self.goal_y
+
+        # The global planner is currently 2D.
         target.z = 0.0
+
+        # ----------------------------------------------------------
+        # Publish
+        # ----------------------------------------------------------
 
         self.target_pub.publish(target)
 
-        self.get_logger().info(
-            f'Published /target_waypoint: '
-            f'X={target.x:.4f}, '
-            f'Y={target.y:.4f}'
-        )
+    # ==============================================================
+    # CURRENT DESTINATION INFORMATION
+    # ==============================================================
+
+    def get_current_goal(self):
+        """
+        Return the currently selected destination.
+
+        Returns:
+            (x, y) if a destination exists
+            None otherwise
+        """
+
+        if self.goal_x is None or self.goal_y is None:
+            return None
+
+        return self.goal_x, self.goal_y
 
 
 # ==================================================================
@@ -157,6 +280,7 @@ def main(args=None):
         pass
 
     finally:
+
         node.destroy_node()
 
         if rclpy.ok():
