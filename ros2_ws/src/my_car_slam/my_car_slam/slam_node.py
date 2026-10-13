@@ -1,4 +1,3 @@
-
 import math
 
 import numpy as np
@@ -6,6 +5,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from sensor_msgs.msg import PointCloud2
@@ -272,7 +272,7 @@ class SimpleSLAM(Node):
         )
 
         self.get_logger().info(
-            'SimpleSLAM started - LIVE DATA MODE'
+            'SimpleSLAM started - LIVE DATA MODE (scan-time TF)'
         )
 
         self.get_logger().info(
@@ -374,7 +374,26 @@ class SimpleSLAM(Node):
             return
 
         # ------------------------------------------------------------
-        # LASER -> BASE_LINK TF
+        # USE THE SCAN TIMESTAMP FOR ALL POSE / TF LOOKUPS
+        # ------------------------------------------------------------
+        # Using the latest transform can mismatch a moving/turning car
+        # with an older LiDAR scan. Use the scan's own timestamp instead.
+        stamp_is_zero = (
+            msg.header.stamp.sec == 0 and
+            msg.header.stamp.nanosec == 0
+        )
+        if stamp_is_zero:
+            self.get_logger().warn(
+                'PointCloud2 stamp is zero; falling back to latest TF. '
+                'Check the Gazebo /scan timestamps.',
+                throttle_duration_sec=5.0
+            )
+            scan_time = Time()
+        else:
+            scan_time = Time.from_msg(msg.header.stamp)
+
+        # ------------------------------------------------------------
+        # LASER -> BASE_LINK TF AT SCAN TIME
         # ------------------------------------------------------------
 
         try:
@@ -383,7 +402,7 @@ class SimpleSLAM(Node):
                 self.tf_buffer.lookup_transform(
                     self.base_frame,
                     laser_frame,
-                    rclpy.time.Time(),
+                    scan_time,
                     timeout=Duration(
                         seconds=0.2
                     )
@@ -504,11 +523,36 @@ class SimpleSLAM(Node):
         points_xy = points_base[:, :2]
 
         # ------------------------------------------------------------
-        # ODOM POSE
+        # ODOM POSE AT THE SAME TIMESTAMP AS THE SCAN
         # ------------------------------------------------------------
+        # Query odom -> base_link at scan_time instead of using the latest
+        # /odom message, which may belong to a different moment during a turn.
+        try:
+            odom_to_base = self.tf_buffer.lookup_transform(
+                self.odom_frame,
+                self.base_frame,
+                scan_time,
+                timeout=Duration(seconds=0.2)
+            )
+        except TransformException as ex:
+            self.get_logger().warn(
+                f'Could not get {self.odom_frame} -> '
+                f'{self.base_frame} TF at scan timestamp: {ex}. '
+                'Skipping this scan to avoid mapping it at the wrong pose.',
+                throttle_duration_sec=2.0
+            )
+            return
 
-        odom_x, odom_y, odom_yaw = (
-            self.last_odom_pose
+        odom_translation = odom_to_base.transform.translation
+        odom_rotation = odom_to_base.transform.rotation
+
+        odom_x = odom_translation.x
+        odom_y = odom_translation.y
+        odom_yaw = self.quaternion_to_yaw(
+            odom_rotation.x,
+            odom_rotation.y,
+            odom_rotation.z,
+            odom_rotation.w
         )
 
         # ------------------------------------------------------------
