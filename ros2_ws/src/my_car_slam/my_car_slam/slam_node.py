@@ -41,6 +41,14 @@ class SimpleSLAM(Node):
         self.declare_parameter('min_range', 0.10)
         self.declare_parameter('max_range', 8.0)
 
+        # Reversible occupancy evidence
+        self.declare_parameter('occupied_hit_log_odds', 0.85)
+        self.declare_parameter('free_miss_log_odds', 0.40)
+        self.declare_parameter('occupied_threshold', 1.0)
+        self.declare_parameter('free_threshold', -1.0)
+        self.declare_parameter('log_odds_min', -5.0)
+        self.declare_parameter('log_odds_max', 5.0)
+
         # 3D PointCloud Z filtering
         self.declare_parameter('min_z', -0.20)
         self.declare_parameter('max_z', 0.50)
@@ -49,7 +57,7 @@ class SimpleSLAM(Node):
         self.declare_parameter('map_margin_cells', 20)
 
         # Scan matching
-        self.declare_parameter('use_scan_matching', True)
+        self.declare_parameter('use_scan_matching', False)
         self.declare_parameter('match_every_n_scans', 5)
 
         self.declare_parameter(
@@ -114,6 +122,25 @@ class SimpleSLAM(Node):
             self.get_parameter(
                 'max_range'
             ).value
+        )
+
+        self.occupied_hit_log_odds = float(
+            self.get_parameter('occupied_hit_log_odds').value
+        )
+        self.free_miss_log_odds = float(
+            self.get_parameter('free_miss_log_odds').value
+        )
+        self.occupied_threshold = float(
+            self.get_parameter('occupied_threshold').value
+        )
+        self.free_threshold = float(
+            self.get_parameter('free_threshold').value
+        )
+        self.log_odds_min = float(
+            self.get_parameter('log_odds_min').value
+        )
+        self.log_odds_max = float(
+            self.get_parameter('log_odds_max').value
         )
 
         self.min_z = float(
@@ -195,6 +222,11 @@ class SimpleSLAM(Node):
             -1,
             dtype=np.int8
         )
+        # Accumulated occupancy evidence. Zero means no evidence yet.
+        self.log_odds = np.zeros(
+            (self.map_height, self.map_width),
+            dtype=np.float32
+        )
 
         # ============================================================
         # TF
@@ -258,6 +290,7 @@ class SimpleSLAM(Node):
         self.map_to_odom_yaw = 0.0
 
         self.scan_count = 0
+        self._last_warning_times = {}
 
         self.last_match_score = 0
         self.last_match_valid = False
@@ -383,10 +416,11 @@ class SimpleSLAM(Node):
             msg.header.stamp.nanosec == 0
         )
         if stamp_is_zero:
-            self.get_logger().warn(
+            self.warn_throttled(
+                'zero_scan_stamp',
                 'PointCloud2 stamp is zero; falling back to latest TF. '
                 'Check the Gazebo /scan timestamps.',
-                throttle_duration_sec=5.0
+                interval_sec=5.0
             )
             scan_time = Time()
         else:
@@ -403,9 +437,7 @@ class SimpleSLAM(Node):
                     self.base_frame,
                     laser_frame,
                     scan_time,
-                    timeout=Duration(
-                        seconds=0.2
-                    )
+                    timeout=Duration(seconds=0.0)
                 )
             )
 
@@ -532,14 +564,15 @@ class SimpleSLAM(Node):
                 self.odom_frame,
                 self.base_frame,
                 scan_time,
-                timeout=Duration(seconds=0.2)
+                timeout=Duration(seconds=0.0)
             )
         except TransformException as ex:
-            self.get_logger().warn(
+            self.warn_throttled(
+                'odom_tf_unavailable',
                 f'Could not get {self.odom_frame} -> '
                 f'{self.base_frame} TF at scan timestamp: {ex}. '
                 'Skipping this scan to avoid mapping it at the wrong pose.',
-                throttle_duration_sec=2.0
+                interval_sec=2.0
             )
             return
 
@@ -1199,6 +1232,10 @@ class SimpleSLAM(Node):
             -1,
             dtype=np.int8
         )
+        new_log_odds = np.zeros(
+            (new_height, new_width),
+            dtype=np.float32
+        )
 
         # ------------------------------------------------------------
         # Calculate where old map goes
@@ -1230,12 +1267,19 @@ class SimpleSLAM(Node):
             offset_x:
             offset_x + self.map_width
         ] = self.grid
+        new_log_odds[
+            offset_y:
+            offset_y + self.map_height,
+            offset_x:
+            offset_x + self.map_width
+        ] = self.log_odds
 
         # ------------------------------------------------------------
         # Replace map
         # ------------------------------------------------------------
 
         self.grid = new_grid
+        self.log_odds = new_log_odds
 
         self.map_width = new_width
         self.map_height = new_height
@@ -1260,20 +1304,12 @@ class SimpleSLAM(Node):
         robot_gy,
         points
     ):
-
-        # IMPORTANT:
-        # No map expansion happens here.
-        #
-        # All coordinates were calculated after the
-        # whole-scan expansion.
-
+        # Update free-space evidence along each ray and occupied evidence
+        # at the endpoint. Evidence is clamped and cells can change state.
         for p in points:
-
-            end_gx, end_gy = (
-                self.world_to_grid(
-                    float(p[0]),
-                    float(p[1])
-                )
+            end_gx, end_gy = self.world_to_grid(
+                float(p[0]),
+                float(p[1])
             )
 
             cells = self.bresenham(
@@ -1286,40 +1322,43 @@ class SimpleSLAM(Node):
             if not cells:
                 continue
 
-            # --------------------------------------------------------
-            # FREE CELLS
-            # --------------------------------------------------------
-
+            # Free-space evidence for all cells before the endpoint.
             for gx, gy in cells[:-1]:
+                if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
+                    self.log_odds[gy, gx] = max(
+                        self.log_odds_min,
+                        self.log_odds[gy, gx] - self.free_miss_log_odds
+                    )
+                    self.update_cell_state(gx, gy)
 
-                if (
-                    0 <= gx < self.map_width
-                    and
-                    0 <= gy < self.map_height
-                ):
-
-                    # Do not overwrite occupied cells.
-
-                    if (
-                        self.grid[gy, gx]
-                        != 100
-                    ):
-
-                        self.grid[gy, gx] = 0
-
-            # --------------------------------------------------------
-            # OCCUPIED END CELL
-            # --------------------------------------------------------
-
+            # Occupied evidence at the endpoint.
             gx, gy = cells[-1]
+            if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
+                self.log_odds[gy, gx] = min(
+                    self.log_odds_max,
+                    self.log_odds[gy, gx] + self.occupied_hit_log_odds
+                )
+                self.update_cell_state(gx, gy)
 
-            if (
-                0 <= gx < self.map_width
-                and
-                0 <= gy < self.map_height
-            ):
+    def update_cell_state(self, gx, gy):
+        """Convert accumulated log-odds evidence to OccupancyGrid values."""
+        evidence = self.log_odds[gy, gx]
 
-                self.grid[gy, gx] = 100
+        if evidence >= self.occupied_threshold:
+            self.grid[gy, gx] = 100
+        elif evidence <= self.free_threshold:
+            self.grid[gy, gx] = 0
+        # Between thresholds, preserve the last classified state. This
+        # hysteresis avoids rapid flicker and allows repeated misses to
+        # eventually clear a previously occupied cell.
+
+    def warn_throttled(self, key, message, interval_sec=2.0):
+        """Throttle repeated warnings without unsupported logger kwargs."""
+        now = self.get_clock().now().nanoseconds / 1e9
+        last = self._last_warning_times.get(key, -1e9)
+        if now - last >= interval_sec:
+            self.get_logger().warning(message)
+            self._last_warning_times[key] = now
 
     # ================================================================
     # BRESENHAM
