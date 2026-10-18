@@ -79,6 +79,9 @@ def get_hough_lines(edges):
     if lines is None:
         return []
 
+    # Normalize OpenCV's output to an array of (x1, y1, x2, y2).
+    lines = np.asarray(lines).reshape(-1, 4)
+
     return [tuple(map(int, line)) for line in lines]
 
 

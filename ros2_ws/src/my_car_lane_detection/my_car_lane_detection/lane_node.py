@@ -12,6 +12,7 @@ class LaneDetectionNode(Node):
         super().__init__('lane_detector')
 
         self.bridge = CvBridge()
+        self.debug_counter = 0
 
         self.subscription = self.create_subscription(
             Image,
@@ -27,9 +28,18 @@ class LaneDetectionNode(Node):
         )
 
     def image_callback(self, msg):
+        self.get_logger().info("Received camera image")
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             result = detect_lane(cv_image)
+
+            self.debug_counter += 1
+            if self.debug_counter % 30 == 0:
+                self.get_logger().info(
+                    f"Lane detection: detected={result['detected']}, "
+                    f"offset={result['lane_offset']}, "
+                    f"type={result['detection_type']}"
+                )
 
             lane_offset = result["lane_offset"]
 
