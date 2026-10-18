@@ -32,6 +32,13 @@ MAX_CONVERGENCE_ORIGIN_DISTANCE = 180
 EDGE_TOUCH_MARGIN = 10
 LOOKAHEAD_RATIO = 0.75
 
+COLOR_GRID_SIZE = 12
+ROAD_COLOR_DISTANCE = 25
+ROAD_MIN_REGION_CELLS = 100
+ROAD_MIN_BOTTOM_RATIO = 0.80
+ROAD_REFERENCE_WIDTH = 0.20
+ROAD_REFERENCE_HEIGHT = 0.10
+
 
 def resize_image(image):
     height, width = image.shape[:2]
@@ -901,7 +908,7 @@ def extend_outer_edges(structures, doodles, edge_indices, image_width, image_hei
     return extended
 
 
-def calculate_lateral_error(lane_center_coefficients, image_width, image_height):
+def calculate_hough_lateral_error(lane_center_coefficients, image_width, image_height):
     if lane_center_coefficients is None:
         return None
 
@@ -912,6 +919,214 @@ def calculate_lateral_error(lane_center_coefficients, image_width, image_height)
     normalized_error = pixel_error / image_width
 
     return normalized_error
+
+
+def build_color_grid(image):
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    height, width = image.shape[:2]
+    rows = int(np.ceil(height / COLOR_GRID_SIZE))
+    cols = int(np.ceil(width / COLOR_GRID_SIZE))
+    grid = np.zeros((rows, cols, 3), dtype=np.float32)
+
+    for row in range(rows):
+        for col in range(cols):
+            y1, y2 = row * COLOR_GRID_SIZE, min((row + 1) * COLOR_GRID_SIZE, height)
+            x1, x2 = col * COLOR_GRID_SIZE, min((col + 1) * COLOR_GRID_SIZE, width)
+            grid[row, col] = np.mean(lab[y1:y2, x1:x2].reshape(-1, 3), axis=0)
+
+    return grid
+
+
+def get_road_color_reference(color_grid):
+    rows, cols = color_grid.shape[:2]
+    half_width = max(1, int(cols * ROAD_REFERENCE_WIDTH / 2))
+    start_col = max(0, cols // 2 - half_width)
+    end_col = min(cols, cols // 2 + half_width + 1)
+    start_row = max(0, int(rows * (1 - ROAD_REFERENCE_HEIGHT)))
+    patch = color_grid[start_row:rows, start_col:end_col]
+
+    if patch.size == 0:
+        return None
+
+    return np.median(patch.reshape(-1, 3), axis=0)
+
+
+def find_road_region(color_grid):
+    rows, cols = color_grid.shape[:2]
+    reference_color = get_road_color_reference(color_grid)
+
+    if reference_color is None:
+        return None
+
+    distances = np.linalg.norm(color_grid - reference_color, axis=2)
+    road_mask = (distances <= ROAD_COLOR_DISTANCE).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(road_mask, connectivity=4)
+    valid_labels = []
+
+    for label in range(1, count):
+        area = stats[label, cv2.CC_STAT_AREA]
+        top = stats[label, cv2.CC_STAT_TOP]
+        height = stats[label, cv2.CC_STAT_HEIGHT]
+        bottom_ratio = (top + height) / rows
+
+        if area >= ROAD_MIN_REGION_CELLS and bottom_ratio >= ROAD_MIN_BOTTOM_RATIO:
+            valid_labels.append(label)
+
+    if not valid_labels:
+        return None
+
+    # Select only the largest valid connected component.
+    best_label = max(valid_labels, key=lambda label: stats[label, cv2.CC_STAT_AREA])
+    selected_mask = (labels == best_label)
+
+
+    road_cells = np.argwhere(selected_mask)
+
+    min_row, min_col = road_cells.min(axis=0)
+    max_row, max_col = road_cells.max(axis=0)
+
+    return {
+        "mask": selected_mask.astype(np.uint8),
+        "cells": [tuple(cell) for cell in road_cells],
+        "area": len(road_cells),
+        "min_row": int(min_row),
+        "max_row": int(max_row),
+        "min_col": int(min_col),
+        "max_col": int(max_col),
+        "reference_color": reference_color
+    }
+
+
+def detect_road_region(image):
+    color_grid = build_color_grid(image)
+    road_region = find_road_region(color_grid)
+    return color_grid, road_region
+
+
+def track_ground_corridor(region):
+    if region is None:
+        return None
+
+    mask = region["mask"]
+    rows, cols = mask.shape
+    intervals = {}
+
+    # Find contiguous ground intervals in every grid row.
+    for row in range(rows):
+        ground_cols = np.flatnonzero(mask[row])
+        if len(ground_cols) == 0:
+            continue
+
+        splits = np.where(np.diff(ground_cols) > 1)[0] + 1
+        groups = np.split(ground_cols, splits)
+        intervals[row] = [(int(group[0]), int(group[-1])) for group in groups]
+
+    if not intervals:
+        return None
+
+    # Find a plausible corridor near the bottom, ignoring full-width regions.
+    image_center = (cols - 1) / 2
+    max_start_width = cols * 0.85
+    start_row = None
+    selected = None
+
+    for row in sorted(intervals.keys(), reverse=True):
+        candidates = [
+            item for item in intervals[row]
+            if item[1] - item[0] + 1 < max_start_width
+        ]
+        if not candidates:
+            continue
+
+        selected = min(
+            candidates,
+            key=lambda item: abs((item[0] + item[1]) / 2 - image_center)
+        )
+        start_row = row
+        break
+
+    if selected is None:
+        return {}, intervals
+
+    left, right = selected
+    previous_center = (left + right) / 2
+    previous_width = right - left + 1
+    corridor = {start_row: selected}
+
+    # Track upward, tolerating small gaps and perspective-related width changes.
+    max_center_shift = max(3, cols * 0.06)
+    max_width_change = max(5, previous_width * 0.30)
+    max_missing_rows = 2
+    missing_rows = 0
+
+    for row in range(start_row - 1, min(intervals) - 1, -1):
+        candidates = intervals.get(row, [])
+
+        if not candidates:
+            missing_rows += 1
+            if missing_rows > max_missing_rows:
+                break
+            continue
+
+        valid = []
+        for candidate_left, candidate_right in candidates:
+            center = (candidate_left + candidate_right) / 2
+            width = candidate_right - candidate_left + 1
+            center_shift = abs(center - previous_center)
+            width_change = abs(width - previous_width)
+
+            if center_shift <= max_center_shift and width_change <= max_width_change:
+                score = center_shift + width_change * 0.5
+                valid.append((score, candidate_left, candidate_right))
+
+        if not valid:
+            missing_rows += 1
+            if missing_rows > max_missing_rows:
+                break
+            continue
+
+        _, left, right = min(valid)
+        missing_rows = 0
+        previous_center = (left + right) / 2
+        previous_width = right - left + 1
+        corridor[row] = (left, right)
+
+    return corridor, intervals
+
+
+def calculate_color_lateral_error(region, corridor, image_width, image_height):
+    if region is None or not corridor:
+        return None
+
+    lookahead_y = int(image_height * LOOKAHEAD_RATIO)
+    target_row = lookahead_y / COLOR_GRID_SIZE - 0.5
+    tracked_rows = sorted(corridor)
+
+    # Do not extrapolate beyond the detected corridor.
+    if target_row < tracked_rows[0] or target_row > tracked_rows[-1]:
+        return None
+
+    lower_rows = [row for row in tracked_rows if row <= target_row]
+    upper_rows = [row for row in tracked_rows if row >= target_row]
+    lower = max(lower_rows)
+    upper = min(upper_rows)
+
+    left_lower, right_lower = corridor[lower]
+    left_upper, right_upper = corridor[upper]
+
+    if lower == upper:
+        left, right = left_lower, right_lower
+    else:
+        ratio = (target_row - lower) / (upper - lower)
+        left = left_lower + ratio * (left_upper - left_lower)
+        right = right_lower + ratio * (right_upper - right_lower)
+
+    lane_center_x = ((left + right + 1) / 2) * COLOR_GRID_SIZE
+    lane_center_x = min(max(lane_center_x, 0), image_width - 1)
+    pixel_error = lane_center_x - image_width / 2
+    normalized_error = pixel_error / image_width
+
+    return normalized_error, lookahead_y, lane_center_x, pixel_error
 
 
 def detect_lane(image):
@@ -988,16 +1203,23 @@ def detect_lane(image):
             lane_center_coefficients = fit_lane_center_curve(center_points)
             detection_type = "three_structure_candidate"
 
-    normalized_error = calculate_lateral_error(
-        lane_center_coefficients,
-        width,
-        height
-    )
+    # hough_offset = calculate_hough_lateral_error(lane_center_coefficients, width, height)
+
+    _, road_region = detect_road_region(image)
+    tracked = track_ground_corridor(road_region)
+
+    corridor = tracked[0] if tracked is not None else None
+    color_result = calculate_color_lateral_error(road_region, corridor, width, height)
+
+    normalized_error = color_result[0] if color_result is not None else None
+    color_detected = normalized_error is not None
 
     return {
         "lane_offset": normalized_error,
-        "detected": lane_center_coefficients is not None,
-        "detection_type": detection_type,
+        "detected": color_detected,
+        "detection_type": "color_corridor" if color_detected else None,
         "image_width": width,
-        "image_height": height
+        "image_height": height,
+        # "hough_lane_offset": hough_offset,
+        # "hough_detection_type": detection_type
     }
