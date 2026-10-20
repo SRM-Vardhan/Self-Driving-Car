@@ -42,7 +42,7 @@ class SimpleSLAM(Node):
         self.declare_parameter('max_range', 8.0)
 
         # Reversible occupancy evidence
-        self.declare_parameter('occupied_hit_log_odds', 0.85)
+        self.declare_parameter('occupied_hit_log_odds', 0.95)
         self.declare_parameter('free_miss_log_odds', 0.40)
         self.declare_parameter('occupied_threshold', 1.0)
         self.declare_parameter('free_threshold', -1.0)
@@ -409,8 +409,8 @@ class SimpleSLAM(Node):
         # ------------------------------------------------------------
         # USE THE SCAN TIMESTAMP FOR ALL POSE / TF LOOKUPS
         # ------------------------------------------------------------
-        # Using the latest transform can mismatch a moving/turning car
-        # with an older LiDAR scan. Use the scan's own timestamp instead.
+        ## Using the latest transform can mismatch a moving/turning car
+        # with an olderLider scan.
         stamp_is_zero = (
             msg.header.stamp.sec == 0 and
             msg.header.stamp.nanosec == 0
@@ -557,8 +557,7 @@ class SimpleSLAM(Node):
         # ------------------------------------------------------------
         # ODOM POSE AT THE SAME TIMESTAMP AS THE SCAN
         # ------------------------------------------------------------
-        # Query odom -> base_link at scan_time instead of using the latest
-        # /odom message, which may belong to a different moment during a turn.
+        # Query odom -> base_link 
         try:
             odom_to_base = self.tf_buffer.lookup_transform(
                 self.odom_frame,
@@ -1298,62 +1297,60 @@ class SimpleSLAM(Node):
     # MAP UPDATE / RAY TRACING
     # ================================================================
 
-    def update_map(
-        self,
-        robot_gx,
-        robot_gy,
-        points
-    ):
-        # Update free-space evidence along each ray and occupied evidence
-        # at the endpoint. Evidence is clamped and cells can change state.
+    def update_map(self, robot_gx, robot_gy, points):
+        
+        free_cells = set()
+        hit_cells = set()
+
+        # Collect evidence without modifying the map during ray tracing.
         for p in points:
             end_gx, end_gy = self.world_to_grid(
-                float(p[0]),
-                float(p[1])
+                float(p[0]), float(p[1])
             )
 
             cells = self.bresenham(
-                robot_gx,
-                robot_gy,
-                end_gx,
-                end_gy
+                robot_gx, robot_gy, end_gx, end_gy
             )
-
             if not cells:
                 continue
 
-            # Free-space evidence for all cells before the endpoint.
+            # Cells before the endpoint are free-space evidence.
             for gx, gy in cells[:-1]:
                 if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-                    self.log_odds[gy, gx] = max(
-                        self.log_odds_min,
-                        self.log_odds[gy, gx] - self.free_miss_log_odds
-                    )
-                    self.update_cell_state(gx, gy)
+                    free_cells.add((gx, gy))
 
-            # Occupied evidence at the endpoint.
+            # The endpoint is an obstacle hit.
             gx, gy = cells[-1]
             if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
-                self.log_odds[gy, gx] = min(
-                    self.log_odds_max,
-                    self.log_odds[gy, gx] + self.occupied_hit_log_odds
-                )
-                self.update_cell_state(gx, gy)
+                hit_cells.add((gx, gy))
+
+        # Endpoint hits take priority over free-ray evidence in this scan.
+        free_cells.difference_update(hit_cells)
+
+        # Apply each cell's accumulated per-scan evidence only once.
+        for gx, gy in free_cells:
+            self.log_odds[gy, gx] = max(
+                self.log_odds_min,
+                self.log_odds[gy, gx] - self.free_miss_log_odds
+            )
+            self.update_cell_state(gx, gy)
+
+        for gx, gy in hit_cells:
+            self.log_odds[gy, gx] = min(
+                self.log_odds_max,
+                self.log_odds[gy, gx] + self.occupied_hit_log_odds
+            )
+            self.update_cell_state(gx, gy)
 
     def update_cell_state(self, gx, gy):
-        """Convert accumulated log-odds evidence to OccupancyGrid values."""
         evidence = self.log_odds[gy, gx]
 
         if evidence >= self.occupied_threshold:
             self.grid[gy, gx] = 100
         elif evidence <= self.free_threshold:
             self.grid[gy, gx] = 0
-        # Between thresholds, preserve the last classified state. This
-        # hysteresis avoids rapid flicker and allows repeated misses to
-        # eventually clear a previously occupied cell.
 
     def warn_throttled(self, key, message, interval_sec=2.0):
-        """Throttle repeated warnings without unsupported logger kwargs."""
         now = self.get_clock().now().nanoseconds / 1e9
         last = self._last_warning_times.get(key, -1e9)
         if now - last >= interval_sec:
