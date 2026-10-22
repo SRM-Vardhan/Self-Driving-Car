@@ -1,0 +1,16 @@
+amcl:
+  ros__parameters:
+    use_sim_time: true
+    global_frame_id: map
+    odom_frame_id: odom
+    base_frame_id: base_link
+    scan_topic: /scan_2d
+    tf_broadcast: true
+    transform_tolerance: 0.5
+    min_particles: 500
+    max_particles: 2000
+
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    yaml_filename: ""
