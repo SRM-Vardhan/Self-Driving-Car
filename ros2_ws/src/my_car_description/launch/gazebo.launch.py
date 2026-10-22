@@ -18,7 +18,13 @@ def generate_launch_description():
 
     # 2. Launch Gazebo (The Physics Engine)
     gazebo = ExecuteProcess(
-        cmd=['gazebo', '--verbose', '-s', 'libgazebo_ros_factory.so', world_path],
+    cmd=[
+    'gazebo',
+    '--verbose',
+    '-s', 'libgazebo_ros_init.so',
+    '-s', 'libgazebo_ros_factory.so',
+    world_path
+    ],
         output='screen'
     )
 
