@@ -13,6 +13,8 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <exec_depend>my_car_interfaces</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -3,6 +3,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from nav_msgs.msg import OccupancyGrid, Path, Odometry
 from geometry_msgs.msg import Point, PoseStamped
@@ -17,11 +18,17 @@ class GlobalPlannerNode(Node):
         # SUBSCRIBERS
         # ==========================================
 
+        map_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+
         self.map_sub = self.create_subscription(
             OccupancyGrid,
             '/map',
             self.map_callback,
-            10
+            map_qos
         )
 
         self.target_sub = self.create_subscription(
