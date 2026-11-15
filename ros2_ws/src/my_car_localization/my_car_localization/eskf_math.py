@@ -124,23 +124,23 @@ class FullErrorStateEKF:
         self.sigma_ba = 0.001
         self.sigma_bg = 0.00001
 
-        self.gnss_lever_arm = np.array([0.0, 0.0, 0.30])  # Assuming roof is 30cm (0.30m). Adjust this!
+        self.gps_lever_arm = np.array([0.0, 0.0, 0.30])  # Assuming roof is 30cm (0.30m). Adjust this!
 
         # Measurement noise
         # GNSS position noise (1-sigma E, N, U in metres) by fix quality.
         # Typical values; replace with your receiver's real numbers.
-        self.R_gnss_pos = {
+        self.R_gps_pos = {
             "single":    np.diag([1.5, 1.5, 3.0]) ** 2,
             "dgps":      np.diag([0.5, 0.5, 1.0]) ** 2,
             "rtk_float": np.diag([0.3, 0.3, 0.6]) ** 2,
             "rtk_fixed": np.diag([0.02, 0.02, 0.04]) ** 2,
         }
-        self.R_gnss_vel = np.diag([0.1, 0.1, 0.2]) ** 2   # Doppler velocity is much better than position
-        self.gnss_min_sigma_pos = 0.01                    # floor so a receiver can't claim 0 m error
-        self.gnss_min_sigma_vel = 0.03
-        self.gnss_lever_arm = np.zeros(3)                 # antenna position in body frame [m]; SET THIS
-        self.gnss_max_rejects = 5                         # consecutive gate rejections before forcing an update
-        self._gnss_rejects = 0
+        self.R_gps_vel = np.diag([0.1, 0.1, 0.2]) ** 2   # Doppler velocity is much better than position
+        self.gps_min_sigma_pos = 0.01                    # floor so a receiver can't claim 0 m error
+        self.gps_min_sigma_vel = 0.03
+        self.gps_lever_arm = np.zeros(3)                 # antenna position in body frame [m]; SET THIS
+        self.gps_max_rejects = 5                         # consecutive gate rejections before forcing an update
+        self._gps_rejects = 0
         self._w_last = np.zeros(3)                        # last bias-corrected gyro (for velocity lever arm)
         self.R_wheel = np.diag([0.15, 0.15, 0.3]) ** 2
         self.R_lidar = np.diag([0.08, 0.08, 0.12, 0.02, 0.02, 0.03]) ** 2
@@ -208,7 +208,7 @@ class FullErrorStateEKF:
 
     # ---------------- GNSS ----------------
     @staticmethod
-    def _gnss_cov(cov, default, min_sigma):
+    def _gps_cov(cov, default, min_sigma):
         """Use the receiver's own covariance (3-vector variances or 3x3) if given, else the default."""
         if cov is None:
             R = default.copy()
@@ -219,42 +219,42 @@ class FullErrorStateEKF:
         R[d, d] = np.maximum(R[d, d], min_sigma ** 2)
         return R
 
-    def _gnss_update(self, y, H, R, gate):
+    def _gps_update(self, y, H, R, gate):
         """Gated update, but never lock out GNSS forever (e.g. after an RTK float->fixed jump)."""
-        use_gate = gate if self._gnss_rejects < self.gnss_max_rejects else None
+        use_gate = gate if self._gps_rejects < self.gps_max_rejects else None
         ok = self._update(y, H, R, use_gate)
-        self._gnss_rejects = 0 if ok else self._gnss_rejects + 1
+        self._gps_rejects = 0 if ok else self._gps_rejects + 1
         return ok
 
-    def update_gnss_position(self, z_pos, fix="single", cov=None, gate=CHI2_99[3]):
+    def update_gps_position(self, z_pos, fix="single", cov=None, gate=CHI2_99[3]):
         """ z_pos : antenna position in ENU [m] fix : "none" | "single" | "dgps" | "rtk_float" | "rtk_fixed" cov : optional receiver covariance [m²] (3 variances or 3x3); overrides the fix table """
         if fix == "none":
             return False
-        R = self._gnss_cov(cov, self.R_gnss_pos[fix], self.gnss_min_sigma_pos)
+        R = self._gps_cov(cov, self.R_gps_pos[fix], self.gps_min_sigma_pos)
 
         Rm = quat_to_rotmat(self.q)
-        l = self.gnss_lever_arm
+        l = self.gps_lever_arm
         H = np.zeros((3, 15))
         H[:, 0:3] = I3
         H[:, 6:9] = -Rm @ skew(l)                 # antenna offset rotates with attitude error
         y = z_pos - (self.p + Rm @ l)
-        return self._gnss_update(y, H, R, gate)
+        return self._gps_update(y, H, R, gate)
 
-    def update_gnss_velocity(self, z_vel, fix="single", cov=None, gate=CHI2_99[3]):
+    def update_gps_velocity(self, z_vel, fix="single", cov=None, gate=CHI2_99[3]):
         """z_vel : antenna velocity in ENU [m/s] (Doppler)."""
         if fix == "none":
             return False
-        R = self._gnss_cov(cov, self.R_gnss_vel, self.gnss_min_sigma_vel)
+        R = self._gps_cov(cov, self.R_gps_vel, self.gps_min_sigma_vel)
 
         Rm = quat_to_rotmat(self.q)
-        l = self.gnss_lever_arm
+        l = self.gps_lever_arm
         c = np.cross(self._w_last, l)             # antenna velocity due to rotation (body frame)
         H = np.zeros((3, 15))
         H[:, 3:6] = I3
         H[:, 6:9] = -Rm @ skew(c)
         H[:, 12:15] = Rm @ skew(l)                # gyro bias changes the rotational term
         y = z_vel - (self.v + Rm @ c)
-        return self._gnss_update(y, H, R, gate)
+        return self._gps_update(y, H, R, gate)
 
     # ---------------- Wheel encoders ----------------
     def update_wheel_velocity(self, v_left, v_right, gate=CHI2_99[3]):

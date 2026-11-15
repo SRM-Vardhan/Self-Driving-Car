@@ -183,12 +183,12 @@
         <visual><geometry><box size="0.05 0.05 0.05"/></geometry><material name="purple"/></visual>
     </link>
 
-    <joint name="gnss_joint" type="fixed">
+    <joint name="gps_joint" type="fixed">
         <parent link="roof"/>
-        <child link="gnss_link"/>
+        <child link="gps_link"/>
         <origin xyz="-0.12 0 0.015" rpy="0 0 0"/> 
     </joint>
-    <link name="gnss_link">
+    <link name="gps_link">
         <visual><geometry><cylinder radius="0.02" length="0.02"/></geometry><material name="yellow"/></visual>
     </link>
 
@@ -287,16 +287,16 @@
         </sensor>
     </gazebo>
 
-    <gazebo reference="gnss_link">
-        <sensor name="gnss_sensor" type="gps">
+    <gazebo reference="gps_link">
+        <sensor name="gps_sensor" type="gps">
             <always_on>true</always_on>
             <update_rate>5.0</update_rate>
-            <plugin name="gnss_controller" filename="libgazebo_ros_gps_sensor.so">
+            <plugin name="gps_controller" filename="libgazebo_ros_gps_sensor.so">
                 <ros>
-                    <remapping>~/out:=/gnss/fix</remapping>
+                    <remapping>~/out:=/gps/fix</remapping>
                 </ros>
                 <output_type>sensor_msgs/NavSatFix</output_type>
-                <frame_name>gnss_link</frame_name>
+                <frame_name>gps_link</frame_name>
             </plugin>
         </sensor>
     </gazebo>
@@ -312,7 +312,7 @@
     <gazebo reference="laser_frame"><material>Gazebo/Blue</material></gazebo>
     <gazebo reference="camera_link"><material>Gazebo/Red</material></gazebo>
     <gazebo reference="imu_link"><material>Gazebo/Purple</material></gazebo>
-    <gazebo reference="gnss_link"><material>Gazebo/Yellow</material></gazebo>
+    <gazebo reference="gps_link"><material>Gazebo/Yellow</material></gazebo>
 
     <gazebo reference="left_rear_wheel">
         <material>Gazebo/FlatBlack</material>

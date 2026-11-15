@@ -21,7 +21,7 @@ class EKFNode(Node):
         self.last_imu_time = None
         
         # Subscribers (Ensure these topic names match your Gazebo outputs)
-        self.imu_sub = self.create_subscription(Imu, '/imu/data', self.imu_callback, 10)
+        self.imu_sub = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
         self.gps_sub = self.create_subscription(NavSatFix, '/gps/fix', self.gps_callback, 10)
         
         # Publishers & TF Broadcaster
@@ -69,7 +69,7 @@ class EKFNode(Node):
         enu_pos = self.geo2enu.__call__(msg.latitude, msg.longitude, msg.altitude)
         
         # 3. UPDATE STEP (Runs slower, at GPS frequency)
-        self.ekf.update_gnss_position(enu_pos, fix="single")
+        self.ekf.update_gps_position(enu_pos, fix="single")
 
     def publish_state(self, stamp):
         state = self.ekf.get_state()
