@@ -82,7 +82,7 @@ class GeodeticToENU:
     A = 6378137.0
     E2 = 6.69437999014e-3
 
-    def _init_(self, lat0_deg, lon0_deg, h0):
+    def __init__(self, lat0_deg, lon0_deg, h0):
         self.lat0, self.lon0 = np.radians(lat0_deg), np.radians(lon0_deg)
         self.ecef0 = self._ecef(self.lat0, self.lon0, h0)
         sl, cl = np.sin(self.lat0), np.cos(self.lat0)
@@ -91,13 +91,13 @@ class GeodeticToENU:
                            [-sl * co, -sl * so, cl],
                            [cl * co, cl * so, sl]])
 
-    def _ecef(self, lat, lon, h):
+    def __ecef(self, lat, lon, h):
         n = self.A / np.sqrt(1 - self.E2 * np.sin(lat) ** 2)
         return np.array([(n + h) * np.cos(lat) * np.cos(lon),
                          (n + h) * np.cos(lat) * np.sin(lon),
                          (n * (1 - self.E2) + h) * np.sin(lat)])
 
-    def _call_(self, lat_deg, lon_deg, h):
+    def __call__(self, lat_deg, lon_deg, h):
         e = self._ecef(np.radians(lat_deg), np.radians(lon_deg), h)
         return self.R @ (e - self.ecef0)
 
@@ -109,7 +109,7 @@ class GeodeticToENU:
 class FullErrorStateEKF:
     """ Nominal state : p(3), v(3), q(4), ba(3), bg(3) Error state : δp, δv, δθ(body frame), δba, δbg -> 15-D """
 
-    def _init_(self):
+    def __init__(self):
         self.p = np.zeros(3)
         self.v = np.zeros(3)
         self.q = np.array([1.0, 0.0, 0.0, 0.0])
@@ -124,7 +124,7 @@ class FullErrorStateEKF:
         self.sigma_ba = 0.001
         self.sigma_bg = 0.00001
 
-        self.gps_lever_arm = np.array([0.0, 0.0, 0.30])  # Assuming roof is 30cm (0.30m). Adjust this!
+        self.gps_lever_arm = np.array([-0.12, 0.0, 0.114])  # Exact Xacro offset (gps_link - imu_link)
 
         # Measurement noise
         # GPS position noise (1-sigma E, N, U in metres) by fix quality.
@@ -317,11 +317,11 @@ class FullErrorStateEKF:
         if q is not None:
             self.q = quat_normalize(np.asarray(q, dtype=float))
         self.P = np.eye(15)
-        self.P[0:3, 0:3] = 5.0 * 2
-        self.P[3:6, 3:6] = 2.0 * 2
-        self.P[6:9, 6:9] = (10 * np.pi / 180) * 2
-        self.P[9:12, 9:12] = 0.2 * 2                  # accel bias [m/s²]
-        self.P[12:15, 12:15] = 0.01 * 2               # gyro bias [rad/s] (0.1 was ~6°/s, far too loose)
+        self.P[0:3, 0:3] = np.eye(3) * (5.0 ** 2)
+        self.P[3:6, 3:6] = np.eye(3) * (2.0 ** 2)
+        self.P[6:9, 6:9] = np.eye(3) * ((10 * np.pi / 180) ** 2)
+        self.P[9:12, 9:12] = np.eye(3) * (0.2 ** 2)
+        self.P[12:15, 12:15] = np.eye(3) * (0.01 ** 2)
 
     def align_roll_pitch_from_accel(self, accel_static, yaw=0.0):
         """Initialise roll/pitch from a stationary accelerometer average (yaw must come from elsewhere)."""
