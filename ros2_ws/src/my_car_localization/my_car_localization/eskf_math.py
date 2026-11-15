@@ -91,7 +91,7 @@ class GeodeticToENU:
                            [-sl * co, -sl * so, cl],
                            [cl * co, cl * so, sl]])
 
-    def __ecef(self, lat, lon, h):
+    def _ecef(self, lat, lon, h):
         n = self.A / np.sqrt(1 - self.E2 * np.sin(lat) ** 2)
         return np.array([(n + h) * np.cos(lat) * np.cos(lon),
                          (n + h) * np.cos(lat) * np.sin(lon),
