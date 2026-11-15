@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Error-State EKF for vehicle localization: IMU + wheel encoders + GNSS + LiDAR pose. Convention (used consistently everywhere): q_true = q_nominal ⊗ δq(δθ) -> δθ is expressed in the BODY frame R_true = R_nominal @ (I + [δθ]x) Quaternions are Hamilton (w, x, y, z), body -> ENU. """
+""" Error-State EKF for vehicle localization: IMU + wheel encoders + GPS + LiDAR pose. Convention (used consistently everywhere): q_true = q_nominal ⊗ δq(δθ) -> δθ is expressed in the BODY frame R_true = R_nominal @ (I + [δθ]x) Quaternions are Hamilton (w, x, y, z), body -> ENU. """
 
 import numpy as np
 from scipy.spatial.transform import Rotation as RSci
@@ -127,7 +127,7 @@ class FullErrorStateEKF:
         self.gps_lever_arm = np.array([0.0, 0.0, 0.30])  # Assuming roof is 30cm (0.30m). Adjust this!
 
         # Measurement noise
-        # GNSS position noise (1-sigma E, N, U in metres) by fix quality.
+        # GPS position noise (1-sigma E, N, U in metres) by fix quality.
         # Typical values; replace with your receiver's real numbers.
         self.R_gps_pos = {
             "single":    np.diag([1.5, 1.5, 3.0]) ** 2,
@@ -206,7 +206,7 @@ class FullErrorStateEKF:
         self.P = 0.5 * (self.P + self.P.T)
         return True
 
-    # ---------------- GNSS ----------------
+    # ---------------- GPS ----------------
     @staticmethod
     def _gps_cov(cov, default, min_sigma):
         """Use the receiver's own covariance (3-vector variances or 3x3) if given, else the default."""
@@ -220,7 +220,7 @@ class FullErrorStateEKF:
         return R
 
     def _gps_update(self, y, H, R, gate):
-        """Gated update, but never lock out GNSS forever (e.g. after an RTK float->fixed jump)."""
+        """Gated update, but never lock out GPS forever (e.g. after an RTK float->fixed jump)."""
         use_gate = gate if self._gps_rejects < self.gps_max_rejects else None
         ok = self._update(y, H, R, use_gate)
         self._gps_rejects = 0 if ok else self._gps_rejects + 1
