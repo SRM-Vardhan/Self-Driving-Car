@@ -144,7 +144,12 @@ class ObstaclePathPlanner:
             return trajectory, 0.0, True
 
         candidates = [
-            0.0, -0.45, 0.45, -0.70, 0.70,
+            0.0,
+            -0.15, 0.15,
+            -0.30, 0.30,
+            -0.45, 0.45,
+            -0.60, 0.60,
+            -0.75, 0.75,
             -self.max_offset, self.max_offset
         ]
 
@@ -161,9 +166,15 @@ class ObstaclePathPlanner:
         seg = np.hypot(np.diff(tx), np.diff(ty))
         s = np.concatenate(([0.0], np.cumsum(seg)))
 
-        # Smoothly introduce the lateral offset (no sideways jump).
-        ramp = np.clip((s - 0.3) / 1.7, 0.0, 1.0)
+        # Smoothly introduce the lateral offset before reaching near obstacles.
+        ramp = np.clip((s - 0.10) / 0.75, 0.0, 1.0)
         ramp = ramp * ramp * (3.0 - 2.0 * ramp)
+
+        # Check clearance ahead of the front axle so side-adjacent pillars
+        # already being cleared do not lock every candidate path.
+        fwd_idx = s >= 0.25
+        if not np.any(fwd_idx):
+            fwd_idx = np.ones_like(s, dtype=bool)
 
         ox = np.asarray(obstacles)[:, 0][None, :]
         oy = np.asarray(obstacles)[:, 1][None, :]
@@ -181,8 +192,8 @@ class ObstaclePathPlanner:
             px = tx - applied * np.sin(th)
             py = ty + applied * np.cos(th)
 
-            # (path points x obstacle points) distance matrix.
-            d = np.hypot(px[:, None] - ox, py[:, None] - oy)
+            # (forward path points x obstacle points) distance matrix.
+            d = np.hypot(px[fwd_idx, None] - ox, py[fwd_idx, None] - oy)
             min_distance = float(d.min())
 
             # Reject paths that violate the safety clearance.
@@ -323,11 +334,17 @@ class SafetyController:
         tx = np.array([p['x'] for p in trajectory], dtype=float)
         ty = np.array([p['y'] for p in trajectory], dtype=float)
 
+        seg = np.hypot(np.diff(tx), np.diff(ty))
+        s = np.concatenate(([0.0], np.cumsum(seg)))
+        fwd_idx = s >= 0.25
+        if not np.any(fwd_idx):
+            fwd_idx = np.ones_like(s, dtype=bool)
+
         obs = np.asarray(obstacles)
 
         d = np.hypot(
-            tx[:, None] - obs[:, 0][None, :],
-            ty[:, None] - obs[:, 1][None, :]
+            tx[fwd_idx, None] - obs[:, 0][None, :],
+            ty[fwd_idx, None] - obs[:, 1][None, :]
         )
 
         min_distance = float(d.min())
@@ -365,7 +382,7 @@ class SafetyController:
 
         # Braking speed based on remaining distance.
         braking_speed = np.sqrt(
-            max(0.0, 2.0 * self.max_acceleration * goal_distance)
+            max(0.0, 1.0 * self.max_acceleration * max(0.0, goal_distance - 0.15))
         )
 
         return max(
@@ -612,27 +629,27 @@ class LocalPlannerNode(Node):
                 ('mpc.horizon', 10),
                 ('mpc.dt', 0.1),
 
-                ('vehicle.wheelbase', 2.5),
-                ('vehicle.max_velocity', 2.0),
-                ('vehicle.max_acceleration', 1.0),
+                ('vehicle.wheelbase', 0.50),
+                ('vehicle.max_velocity', 0.8),
+                ('vehicle.max_acceleration', 0.5),
                 ('vehicle.max_steering_angle', 30.0),
-                ('vehicle.half_width', 0.35),
+                ('vehicle.half_width', 0.22),
 
                 ('frames.base_link', 'base_link'),
 
-                ('safety.min_clearance', 0.25),
-                ('safety.emergency_stop_distance', 0.45),
-                ('safety.obstacle_lookahead', 5.0),
+                ('safety.min_clearance', 0.08),
+                ('safety.emergency_stop_distance', 0.32),
+                ('safety.obstacle_lookahead', 2.0),
                 ('safety.max_avoidance_offset', 1.0),
                 ('safety.friction_coefficient', 0.6),
 
                 ('lane.max_offset', 1.0),
 
-                ('goal.position_tolerance', 0.20),
+                ('goal.position_tolerance', 0.30),
                 ('goal.reset_distance', 0.50),
 
                 ('topics.path', '/global_path'),
-                ('topics.odom', '/odom'),
+                ('topics.odom', '/ekf/odom'),
                 ('topics.scan', '/scan'),
                 ('topics.lane_offset', '/lane_offset'),
                 ('topics.cmd_vel', '/cmd_vel')
@@ -929,15 +946,15 @@ class LocalPlannerNode(Node):
 
             # Retain obstacles within useful vehicle height.
             height_mask = (
-                (xyz_base[:, 2] >= 0.10)
+                (xyz_base[:, 2] >= 0.22)
                 & (xyz_base[:, 2] <= 1.80)
             )
 
             xyz_base = xyz_base[height_mask]
 
-            # Only forward obstacles in the local planning area.
+            # Only forward obstacles ahead of the front bumper in the local planning area.
             forward_mask = (
-                (xyz_base[:, 0] > 0.0)
+                (xyz_base[:, 0] > 0.20)
                 & (xyz_base[:, 0] < self.params['obstacle_lookahead'])
             )
 
